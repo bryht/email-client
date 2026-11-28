@@ -2412,6 +2412,7 @@ dependencies = [
  "futures-util",
  "mail-core",
  "serde_json",
+ "similar",
 ]
 
 [[package]]

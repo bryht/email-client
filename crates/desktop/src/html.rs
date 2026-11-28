@@ -53,7 +53,7 @@ pub fn wrap_email_document(body_html: &str, allow_remote_images: bool) -> String
         "<!doctype html><html><head><meta charset=\"utf-8\">\
 <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src {img_src}; \
 style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'\">\
-<base target=\"_blank\">\
+<base target=\"_self\">\
 <style>body{{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;margin:16px;color:#1f2328;\
 line-height:1.5;word-wrap:break-word}}img{{max-width:100%;height:auto}}</style>\
 </head><body>{body_html}</body></html>"
@@ -197,13 +197,14 @@ pub fn html_to_text(html: &str) -> String {
                     }
                 }
                 ("p" | "div" | "blockquote", true) => ensure_newline(&mut out),
-                ("ul", false) => {
-                    ensure_newline(&mut out);
-                    lists.push(None);
-                }
-                ("ol", false) => {
-                    ensure_newline(&mut out);
-                    lists.push(Some(1));
+                ("ul" | "ol", false) => {
+                    // 顶层列表自成一段；嵌套列表紧接上一行。
+                    if lists.is_empty() {
+                        ensure_blank_line(&mut out)
+                    } else {
+                        ensure_newline(&mut out)
+                    }
+                    lists.push(if name == "ol" { Some(1) } else { None });
                 }
                 ("ul" | "ol", true) => {
                     lists.pop();
@@ -251,6 +252,104 @@ pub fn html_to_text(html: &str) -> String {
         .join("\n")
         .trim()
         .to_string()
+}
+
+const BLOCK_TAGS: [&str; 5] = ["p", "div", "ul", "ol", "blockquote"];
+
+fn tag_name(tag: &str) -> String {
+    tag.trim_start_matches('<')
+        .trim_start_matches('/')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// 把（已清洗的）写信框 HTML 拆成顶层块：段落、列表、引用；顶层的零散文字也算一块。
+pub fn split_blocks(html: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut rest = html;
+    let flush = |current: &mut String, blocks: &mut Vec<String>| {
+        if !current.trim().is_empty() {
+            blocks.push(std::mem::take(current));
+        } else {
+            current.clear();
+        }
+    };
+    while !rest.is_empty() {
+        if rest.starts_with('<') {
+            let end = rest.find('>').map(|i| i + 1).unwrap_or(rest.len());
+            let tag = &rest[..end];
+            rest = &rest[end..];
+            let name = tag_name(tag);
+            let is_block = BLOCK_TAGS.contains(&name.as_str());
+            let closing = tag.starts_with("</");
+            if is_block && !closing {
+                if depth == 0 {
+                    flush(&mut current, &mut blocks);
+                }
+                depth += 1;
+                current.push_str(tag);
+            } else if is_block && closing {
+                current.push_str(tag);
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    flush(&mut current, &mut blocks);
+                }
+            } else {
+                current.push_str(tag);
+            }
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            current.push_str(&rest[..end]);
+            rest = &rest[end..];
+        }
+    }
+    flush(&mut current, &mut blocks);
+    blocks
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 采用改写结果时尽量保留格式：把改写后的纯文本按段落与原有的块对齐，
+/// 文字没变的段落沿用原来的 HTML（粗体、列表、链接都保留），变了的段落按纯文本重建。
+pub fn merge_formatting(old_html: &str, new_text: &str) -> String {
+    let old: Vec<(String, String)> = split_blocks(old_html)
+        .into_iter()
+        .map(|b| (collapse_ws(&html_to_text(&b)), b))
+        .filter(|(t, _)| !t.is_empty())
+        .collect();
+    let new_paras: Vec<String> = new_text
+        .replace("\r\n", "\n")
+        .split("\n\n")
+        .map(|p| p.trim_matches('\n').trim_end().to_string())
+        .filter(|p| !p.trim().is_empty())
+        .collect();
+    let old_texts: Vec<String> = old.iter().map(|(t, _)| t.clone()).collect();
+    let new_texts: Vec<String> = new_paras.iter().map(|p| collapse_ws(p)).collect();
+
+    let mut out = String::new();
+    for op in similar::capture_diff_slices(similar::Algorithm::Myers, &old_texts, &new_texts) {
+        let (tag, old_range, new_range) = op.as_tag_tuple();
+        match tag {
+            similar::DiffTag::Equal => {
+                for i in old_range {
+                    out.push_str(&old[i].1);
+                }
+            }
+            similar::DiffTag::Delete => {}
+            similar::DiffTag::Insert | similar::DiffTag::Replace => {
+                for j in new_range {
+                    out.push_str(&text_to_html(&new_paras[j]));
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -333,7 +432,42 @@ mod tests {
         let html = "<p>Points:</p><ol><li>first</li><li>second &amp; more</li></ol><ul><li>dot</li></ul><p>See <a href=\"https://example.com\">site</a> or <a href=\"mailto:a@b.com\">a@b.com</a>.</p><div>Chrome&nbsp;line<br>next</div>";
         assert_eq!(
             html_to_text(html),
-            "Points:\n1. first\n2. second & more\n- dot\n\nSee site <https://example.com> or a@b.com.\n\nChrome line\nnext"
+            "Points:\n\n1. first\n2. second & more\n\n- dot\n\nSee site <https://example.com> or a@b.com.\n\nChrome line\nnext"
+        );
+    }
+
+    #[test]
+    fn splits_top_level_blocks() {
+        let html = "<p><b>Hi</b> Maya,</p><ul><li>a</li><li>b</li></ul>loose <i>text</i><div><div>nested</div></div>";
+        assert_eq!(
+            split_blocks(html),
+            vec![
+                "<p><b>Hi</b> Maya,</p>",
+                "<ul><li>a</li><li>b</li></ul>",
+                "loose <i>text</i>",
+                "<div><div>nested</div></div>",
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_keeps_formatting_of_unchanged_paragraphs() {
+        let old = "<p><b>Hi</b> Maya,</p><p>Thursday doesn't work.</p><ul><li>a</li><li><a href=\"https://x.com\">b</a></li></ul><p>Best,</p>";
+        let current_text = html_to_text(old);
+        let new_text = current_text.replace("Thursday doesn't work.", "Thursday works.");
+        assert_eq!(
+            merge_formatting(old, &new_text),
+            "<p><b>Hi</b> Maya,</p><p>Thursday works.</p><ul><li>a</li><li><a href=\"https://x.com\">b</a></li></ul><p>Best,</p>"
+        );
+    }
+
+    #[test]
+    fn merge_handles_inserted_and_removed_paragraphs() {
+        let old = "<div><b>Hi</b></div><div>remove me</div><div>keep <i>this</i></div>";
+        let new_text = "Hi\n\nkeep this\n\nnew line";
+        assert_eq!(
+            merge_formatting(old, new_text),
+            "<div><b>Hi</b></div><div>keep <i>this</i></div><p>new line</p>"
         );
     }
 }

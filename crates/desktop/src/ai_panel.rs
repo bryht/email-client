@@ -3,8 +3,8 @@
 //!
 //! 模型调用是阻塞的，放在后台线程执行，结果经通道回到界面。
 
-use crate::composer::write_editor_html;
-use crate::html::{html_to_text, text_to_html};
+use crate::composer::{EDITOR_ID, js_string, write_editor_html};
+use crate::html::{clean_composer_html, html_to_text, merge_formatting, text_to_html};
 use ai::cli::{CliBackend, CliConfig, CliKind, Login};
 use ai::{
     AiError, Analysis, Answer, Assistant, Decision, DiffSpan, Draft, DraftBasis, DraftRequest,
@@ -219,74 +219,76 @@ pub fn AiPanel(props: AiPanelProps) -> Element {
         let Some((rev, new_basis)) = pending.take() else {
             return;
         };
-        let html = text_to_html(&rev.draft.body);
+        // 没变的段落沿用原来的格式，只重建改动的段落。
+        let html = merge_formatting(&content.read(), &rev.draft.body);
         write_editor_html(&html);
         content.set(html);
         back_translation.set(rev.draft.back_translation);
         basis.set(Some(new_basis));
     };
 
-    // 自动演示：分析 → 每题选第一个选项 → 生成草稿。
+    // 自动演示（--autopilot）：分析 → 每题选第一个选项 → 生成草稿 → 模拟手改（第一段加粗）
+    // → 改选第一个问题 → 改写 → 采用，并把结果以 JSON 打印到标准输出，便于在无界面环境中检查。
     if props.settings.autopilot {
         use_future(move || async move {
             analyze();
             while phase() == Phase::Analyzing {
-                let _ =
-                    document::eval("await new Promise(r => setTimeout(r, 300)); return 0;").await;
+                pause(300).await;
             }
-            if let Some(a) = analysis.read().clone() {
-                let mut picks = Vec::new();
-                for q in &a.questions {
-                    if let Some(o) = q.options.first() {
-                        set_answer(
-                            &mut picks,
-                            &q.id,
-                            Some(Decision::Choice {
-                                choice_id: o.id.clone(),
-                            }),
-                        );
-                    }
-                }
-                answers.set(picks);
-                generate();
-                // 第二步：草稿生成后，把第一个问题改选第二个选项，演示改写与修改对比。
-                let _ =
-                    document::eval("await new Promise(r => setTimeout(r, 500)); return 0;").await;
-                while busy() {
-                    let _ = document::eval("await new Promise(r => setTimeout(r, 300)); return 0;")
-                        .await;
-                }
-                if let Some(q) = a.questions.first()
-                    && let Some(o) = q.options.get(1)
-                {
-                    set_answer(
-                        &mut answers.write(),
-                        &q.id,
-                        Some(Decision::Choice {
-                            choice_id: o.id.clone(),
-                        }),
-                    );
-                    generate();
-                    let _ = document::eval("await new Promise(r => setTimeout(r, 500)); return 0;")
-                        .await;
-                    while busy() {
-                        let _ =
-                            document::eval("await new Promise(r => setTimeout(r, 300)); return 0;")
-                                .await;
-                    }
-                    document::eval(
-                        "const p = document.querySelector('.ai-panel'); if (p) p.scrollTop = p.scrollHeight;",
-                    );
-                    // 把结果打印出来，便于在无界面环境中检查。
-                    let report = serde_json::json!({
-                        "questions": a.questions.len(),
-                        "draft": html_to_text(&content.read()),
-                        "revision": pending.read().as_ref().map(|(r, _)| ai::render_marked(&r.changes)),
-                        "error": error.read().clone(),
-                    });
-                    println!("AUTOPILOT {report}");
-                }
+            let Some(a) = analysis.read().clone() else {
+                return;
+            };
+            let first_choice = |q: &ai::Question, i: usize| {
+                q.options.get(i).map(|o| Decision::Choice {
+                    choice_id: o.id.clone(),
+                })
+            };
+            let mut picks = Vec::new();
+            for q in &a.questions {
+                set_answer(&mut picks, &q.id, first_choice(q, 0));
             }
+            answers.set(picks);
+            generate();
+            pause(500).await;
+            while busy() {
+                pause(300).await;
+            }
+
+            let js = format!(
+                "const el = document.getElementById({id}); const p = el.querySelector('p');
+                 if (p) {{ const r = document.createRange(); r.selectNodeContents(p);
+                   const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+                   document.execCommand('bold'); }}
+                 return el.innerHTML;",
+                id = js_string(EDITOR_ID)
+            );
+            if let Ok(serde_json::Value::String(raw)) = document::eval(&js).await {
+                content.set(clean_composer_html(&raw));
+            }
+            let before = content.read().clone();
+
+            let Some(q) = a.questions.first() else {
+                return;
+            };
+            set_answer(&mut answers.write(), &q.id, first_choice(q, 1));
+            generate();
+            pause(500).await;
+            while busy() {
+                pause(300).await;
+            }
+            let revision = pending
+                .read()
+                .as_ref()
+                .map(|(r, _)| ai::render_marked(&r.changes));
+            accept();
+            let report = serde_json::json!({
+                "questions": a.questions.len(),
+                "draft_html_before": before,
+                "revision": revision,
+                "final_html": content.read().clone(),
+                "error": error.read().clone(),
+            });
+            println!("AUTOPILOT {report}");
         });
     }
 
@@ -440,4 +442,11 @@ fn conn_label(s: &AiSettings) -> String {
         Some(m) => format!("{name} · {m}"),
         None => name.to_string(),
     }
+}
+
+async fn pause(ms: u32) {
+    let _ = document::eval(&format!(
+        "await new Promise(r => setTimeout(r, {ms})); return 0;"
+    ))
+    .await;
 }
