@@ -213,17 +213,24 @@ pub fn Timeline(props: TimelineProps) -> Element {
 mod tests {
     use super::*;
 
-    fn mail(from: &str, ts: &str) -> Email {
-        let raw =
-            format!("From: {from}\r\nTo: lin@example.com\r\nSubject: s\r\nDate: {ts}\r\n\r\nx");
+    fn mail(from: &str, to: &str, ts: &str) -> Email {
+        let raw = format!("From: {from}\r\nTo: {to}\r\nSubject: s\r\nDate: {ts}\r\n\r\nx");
         Email::parse(raw.as_bytes()).unwrap()
     }
 
     #[test]
     fn active_message_is_latest_from_someone_else() {
         let emails = vec![
-            mail("maya@example.com", "01 Mar 2026 09:00:00 +0000"),
-            mail("lin@example.com", "02 Mar 2026 09:00:00 +0000"),
+            mail(
+                "maya@example.com",
+                "lin@example.com",
+                "01 Mar 2026 09:00:00 +0000",
+            ),
+            mail(
+                "lin@example.com",
+                "maya@example.com",
+                "02 Mar 2026 09:00:00 +0000",
+            ),
         ];
         let convs = conversation::group(&emails, &["lin@example.com".into()]);
         assert_eq!(
