@@ -24,19 +24,33 @@ pub async fn read_editor_html() -> Option<String> {
 }
 
 /// 用（已清洗的）HTML 替换编辑区内容，并把光标放到末尾。
-pub fn write_editor_html(html: &str) {
-    let js = format!(
+fn write_js(html: &str) -> String {
+    format!(
         "const el = document.getElementById({id});
-         if (el) {{
-           el.innerHTML = {html};
-           el.focus();
-           const r = document.createRange(); r.selectNodeContents(el); r.collapse(false);
-           const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
-         }}",
+         if (!el) {{ return null; }}
+         el.innerHTML = {html};
+         el.focus();
+         const r = document.createRange(); r.selectNodeContents(el); r.collapse(false);
+         const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+         return el.innerHTML;",
         id = js_string(EDITOR_ID),
         html = js_string(html)
-    );
-    document::eval(&js);
+    )
+}
+
+/// 用（已清洗的）HTML 替换编辑区内容，并把光标放到末尾。不等待完成；
+/// 用于流式写入等只需保证先后顺序的场合。
+pub fn write_editor_html(html: &str) {
+    document::eval(&write_js(html));
+}
+
+/// 与 [`write_editor_html`] 相同，但等待写入完成，并返回写入后编辑区的 HTML；
+/// 找不到编辑区时返回 `None`。
+pub async fn set_editor_html(html: &str) -> Option<String> {
+    document::eval(&write_js(html))
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
 }
 
 /// 格式命令。由浏览器在当前选区上执行。

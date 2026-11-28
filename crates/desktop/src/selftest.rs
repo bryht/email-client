@@ -1,7 +1,7 @@
 //! 自检：加载恶意来信和恶意粘贴内容，自动检查隔离与清洗是否生效。
 //! 运行 `letterdesk-desktop --selftest`，结果以 JSON 输出到标准输出，全部通过时退出码为 0。
 
-use crate::composer::{EDITOR_ID, js_string, read_editor_html, write_editor_html};
+use crate::composer::{EDITOR_ID, js_string, read_editor_html, set_editor_html};
 use crate::html::{clean_composer_html, html_to_text, text_to_html};
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -115,8 +115,12 @@ pub async fn run() {
 
     // 3. 填入 AI 草稿后读回，纯文本与原文一致。
     let draft = "Hi Maya,\n\nThursday works.\nSee you then.\n\nBest,";
-    write_editor_html(&text_to_html(draft));
-    let back = read_editor_html().await.unwrap_or_default();
+    // 等写入完成后再读回，避免在较慢的机器上读到写入之前的内容。
+    let written = set_editor_html(&text_to_html(draft)).await;
+    let back = match written {
+        Some(html) => html,
+        None => read_editor_html().await.unwrap_or_default(),
+    };
     let back_text = html_to_text(&clean_composer_html(&back));
     check(
         "填入的草稿读回后与原文一致",
