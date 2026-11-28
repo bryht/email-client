@@ -8,6 +8,7 @@
 
 mod interactive;
 mod render;
+mod sync;
 
 use ai::cli::{CliBackend, CliConfig, CliKind, Login};
 use ai::{Analysis, Answer, Assistant, Decision, DraftBasis, DraftRequest, Tone};
@@ -26,6 +27,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 同步邮箱到本地 .eml 目录（之后可用 letterdesk-desktop --mailbox 打开）
+    Sync {
+        #[command(subcommand)]
+        account: SyncAccount,
+    },
     /// 交互式回信：分析来信、逐个选择、生成草稿，再按新的选择改写并查看修改对比
     Reply {
         /// 来信（.eml 文件）
@@ -79,6 +85,25 @@ enum Command {
         /// 采用改写结果并写入此文件（可与 --draft 相同）
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncAccount {
+    /// Outlook.com / Microsoft 365（微软登录 + Microsoft Graph）
+    Outlook {
+        /// 保存邮件的目录
+        #[arg(long)]
+        out: PathBuf,
+        /// 应用（客户端）ID；对着模拟服务时用 letterdesk-mock 打印的 ID
+        #[arg(long)]
+        client_id: String,
+        /// 登录与 Graph 的基地址，例如模拟服务 http://127.0.0.1:8901；不填则连接真实的微软服务
+        #[arg(long)]
+        base: Option<String>,
+        /// 不打开浏览器，由本程序直接完成授权页跳转（只用于模拟服务）
+        #[arg(long)]
+        headless_login: bool,
     },
 }
 
@@ -250,6 +275,7 @@ fn main() {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Sync { account } => sync::run(account),
         Command::Reply { eml, conn, out } => {
             let email = load_email(&eml)?;
             let assistant = Assistant::new(conn.backend()?, conn.ui_lang.clone());

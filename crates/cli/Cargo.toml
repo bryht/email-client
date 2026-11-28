@@ -18,3 +18,6 @@ ai.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+mail-sync = { path = "../mail-sync" }
+webbrowser = "1"
+ureq = "3"

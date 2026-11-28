@@ -27,6 +27,8 @@ allow = [
     "MPL-2.0",
     # libfuzzer-sys（Dioxus 图片解码的间接依赖）；FSF 认定与 GPL 兼容。
     "NCSA",
+    # webpki-roots（ureq 内置的 Mozilla 根证书列表，属数据许可）。
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

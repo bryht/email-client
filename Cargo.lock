@@ -2467,7 +2467,10 @@ dependencies = [
  "anyhow",
  "clap",
  "mail-core",
+ "mail-sync",
  "serde_json",
+ "ureq",
+ "webbrowser",
 ]
 
 [[package]]
@@ -2656,6 +2659,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ec00bda90c6e645a54506c630c2820cd6b1890cfd2b0a169b50f74b2b8c7c86"
 dependencies = [
  "hashify",
+]
+
+[[package]]
+name = "mail-sync"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "form_urlencoded",
+ "mail-core",
+ "mock-servers",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]
