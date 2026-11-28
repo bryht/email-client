@@ -14,6 +14,7 @@ mod ai_panel;
 mod composer;
 mod html;
 mod inbox;
+mod reply;
 mod selftest;
 mod settings;
 
@@ -24,18 +25,26 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use inbox::{ConversationList, Timeline, active_message};
 use mail_core::Email;
-use std::path::Path;
+use mail_sync::account::AccountConfig;
+use reply::ReplyBar;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 const STYLE: &str = include_str!("style.css");
 const DEFAULT_EMAIL: &[u8] = include_bytes!("../../../samples/html-newsletter.eml");
-const USAGE: &str = "用法：letterdesk-desktop [--mailbox 目录] [--email 来信.eml ...] [--me 我的地址 ...] \
+const USAGE: &str = "用法：letterdesk-desktop [--mailbox 目录] [--account 账号.json] [--email 来信.eml ...] [--me 我的地址 ...] \
 [--draft 草稿.txt] [--backend claude|ollama|codex] [--model 模型] [--login api-key|subscription] \
 [--allow-unverified] [--my-name 名字] [--autopilot] [--selftest]";
 
 #[derive(Debug, Clone)]
 pub struct Args {
     pub emails: Vec<Email>,
+    /// 每封邮件在同步目录中的文件名（不含扩展名），与 `emails` 一一对应。
+    pub ids: Vec<String>,
+    /// `--mailbox` 目录；配置了账号时同步到这里。
+    pub mailbox_dir: Option<PathBuf>,
+    /// `--account` 账号文件。
+    pub account: Option<AccountConfig>,
     /// 自己的地址和别名，用于归组和计算回复对象。
     pub me: Vec<String>,
     /// 启动时放进写信框的草稿（纯文本）。
@@ -51,7 +60,14 @@ fn load_eml(path: &Path) -> Result<Email, String> {
     Email::parse(&raw).map_err(|e| format!("无法解析 {}：{e}", path.display()))
 }
 
-fn load_mailbox(dir: &Path) -> Result<Vec<Email>, String> {
+fn stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// 读取目录中所有 `.eml`，返回 (邮件, 文件名) 列表。
+pub fn load_mailbox(dir: &Path) -> Result<Vec<(Email, String)>, String> {
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| format!("无法读取目录 {}：{e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -61,7 +77,7 @@ fn load_mailbox(dir: &Path) -> Result<Vec<Email>, String> {
     let mut emails = Vec::new();
     for p in paths {
         match load_eml(&p) {
-            Ok(e) => emails.push(e),
+            Ok(e) => emails.push((e, stem(&p))),
             Err(err) => eprintln!("跳过：{err}"),
         }
     }
@@ -69,8 +85,10 @@ fn load_mailbox(dir: &Path) -> Result<Vec<Email>, String> {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut emails = Vec::new();
-    let mut me = Vec::new();
+    let mut emails: Vec<(Email, String)> = Vec::new();
+    let mut mailbox_dir: Option<PathBuf> = None;
+    let mut account: Option<AccountConfig> = None;
+    let mut me: Vec<String> = Vec::new();
     let mut draft_path = None;
     let mut selftest = false;
     let mut ai = AiSettings {
@@ -88,8 +106,21 @@ fn parse_args() -> Result<Args, String> {
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--email" => emails.push(load_eml(Path::new(&value(&mut it, "--email")?))?),
-            "--mailbox" => emails.extend(load_mailbox(Path::new(&value(&mut it, "--mailbox")?))?),
+            "--email" => {
+                let p = PathBuf::from(value(&mut it, "--email")?);
+                emails.push((load_eml(&p)?, stem(&p)));
+            }
+            "--mailbox" => {
+                let dir = PathBuf::from(value(&mut it, "--mailbox")?);
+                if dir.exists() {
+                    emails.extend(load_mailbox(&dir)?);
+                }
+                mailbox_dir = Some(dir);
+            }
+            "--account" => {
+                let p = PathBuf::from(value(&mut it, "--account")?);
+                account = Some(AccountConfig::load(&p).map_err(|e| e.to_string())?);
+            }
             "--me" => me.push(value(&mut it, "--me")?),
             "--draft" => draft_path = Some(value(&mut it, "--draft")?),
             "--backend" => {
@@ -121,17 +152,31 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     if selftest {
-        emails =
-            vec![Email::parse(selftest::MALICIOUS_EMAIL.as_bytes()).map_err(|e| e.to_string())?];
+        emails = vec![(
+            Email::parse(selftest::MALICIOUS_EMAIL.as_bytes()).map_err(|e| e.to_string())?,
+            "selftest".into(),
+        )];
     } else if emails.is_empty() {
-        emails.push(Email::parse(DEFAULT_EMAIL).map_err(|e| e.to_string())?);
+        emails.push((
+            Email::parse(DEFAULT_EMAIL).map_err(|e| e.to_string())?,
+            "sample".into(),
+        ));
     }
+    if let Some(a) = &account
+        && !me.iter().any(|m| m.eq_ignore_ascii_case(a.address()))
+    {
+        me.push(a.address().to_string());
+    }
+    let (emails, ids): (Vec<Email>, Vec<String>) = emails.into_iter().unzip();
     let draft = match draft_path {
         Some(p) => Some(std::fs::read_to_string(&p).map_err(|e| format!("无法读取 {p}：{e}"))?),
         None => None,
     };
     Ok(Args {
         emails,
+        ids,
+        mailbox_dir,
+        account,
         me,
         draft,
         ai,
@@ -168,20 +213,66 @@ fn main() {
 #[component]
 fn App() -> Element {
     let args = ARGS.get().expect("args");
-    let conversations = use_hook(|| conversation::group(&args.emails, &args.me));
+    // 邮件与对应的文件名；同步后整体替换。
+    let mut mail = use_signal(|| (args.emails.clone(), args.ids.clone()));
+    let me = args.me.clone();
+    let conversations = use_memo(move || conversation::group(&mail.read().0, &me));
     let mut selected = use_signal(|| 0usize);
     let remote_images = use_signal(|| true);
     // 写信框内容（清洗后的 HTML），写信框与回复建议面板共用。
     let mut content = use_signal(String::new);
+    let mut sync_status = use_signal(|| None::<String>);
+    let mut syncing = use_signal(|| false);
 
     if args.selftest {
         use_future(|| async { selftest::run().await });
     }
 
-    let conv = conversations[selected().min(conversations.len() - 1)].clone();
-    let active = active_message(&conv, &args.emails, &args.me);
-    let active_email = args.emails[active].clone();
-    let active_key = format!("{}-{active}", conv.id);
+    // 同步账号到 --mailbox 目录，然后重新读取。
+    let mut sync = move || {
+        let (Some(account), Some(dir)) = (args.account.clone(), args.mailbox_dir.clone()) else {
+            return;
+        };
+        if syncing() {
+            return;
+        }
+        syncing.set(true);
+        sync_status.set(Some("正在同步……".into()));
+        spawn(async move {
+            let (tx, rx) = futures_channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = account
+                    .sync(&mail_sync::credentials::KeyringStore, &dir)
+                    .map_err(|e| e.to_string())
+                    .and_then(|stats| load_mailbox(&dir).map(|m| (stats, m)));
+                let _ = tx.send(result);
+            });
+            match rx.await {
+                Ok(Ok((stats, loaded))) => {
+                    let (emails, ids): (Vec<Email>, Vec<String>) = loaded.into_iter().unzip();
+                    if !emails.is_empty() {
+                        mail.set((emails, ids));
+                    }
+                    sync_status.set(Some(format!(
+                        "同步完成：新增 {}，删除 {}",
+                        stats.downloaded, stats.removed
+                    )));
+                }
+                Ok(Err(e)) => sync_status.set(Some(format!("同步失败：{e}"))),
+                Err(_) => sync_status.set(Some("同步失败：后台任务意外结束".into())),
+            }
+            syncing.set(false);
+        });
+    };
+
+    let convs = conversations.read().clone();
+    let (emails, ids) = mail.read().clone();
+    let conv = convs[selected().min(convs.len().saturating_sub(1))].clone();
+    let active = active_message(&conv, &emails, &args.me);
+    let active_email = emails[active].clone();
+    let active_id = ids[active].clone();
+    let active_key = format!("{}-{active_id}", conv.id);
+    let can_sync = args.account.is_some() && args.mailbox_dir.is_some();
 
     rsx! {
         style { {STYLE} }
@@ -191,24 +282,39 @@ fn App() -> Element {
                 div { class: "rail-item", "People" }
                 div { class: "rail-item", "Calendar" }
             }
-            ConversationList {
-                conversations: conversations.clone(),
-                emails: args.emails.clone(),
-                me: args.me.clone(),
-                selected: selected(),
-                on_select: move |i: usize| {
-                    if i != selected() {
-                        selected.set(i);
-                        // 换对话时清空写信框；回复建议面板随 key 重建。
-                        write_editor_html("");
-                        content.set(String::new());
+            div { class: "conv-col",
+                if can_sync {
+                    div { class: "sync-bar",
+                        button {
+                            class: "ghost small",
+                            disabled: syncing(),
+                            onclick: move |_| sync(),
+                            if syncing() { "同步中…" } else { "同步" }
+                        }
+                        if let Some(s) = sync_status.read().clone() {
+                            span { class: "ai-note", "{s}" }
+                        }
                     }
-                },
+                }
+                ConversationList {
+                    conversations: convs.clone(),
+                    emails: emails.clone(),
+                    me: args.me.clone(),
+                    selected: selected(),
+                    on_select: move |i: usize| {
+                        if i != selected() {
+                            selected.set(i);
+                            // 换对话时清空写信框；回复建议面板和回复栏随 key 重建。
+                            write_editor_html("");
+                            content.set(String::new());
+                        }
+                    },
+                }
             }
             section { class: "reader",
                 Timeline {
                     conversation: conv.clone(),
-                    emails: args.emails.clone(),
+                    emails: emails.clone(),
                     active,
                     remote_images,
                 }
@@ -238,6 +344,21 @@ fn App() -> Element {
             }
             section { class: "compose",
                 h2 { "回复 {active_email.from.display_name()}" }
+                ReplyBar {
+                    key: "{active_key}",
+                    email: active_email.clone(),
+                    original_id: active_id.clone(),
+                    me: args.me.clone(),
+                    my_name: args.ai.my_name.clone(),
+                    account: args.account.clone(),
+                    content,
+                    on_sent: move |_| {
+                        // 已发送：清空写信框，同步后回信出现在时间线里。
+                        write_editor_html("");
+                        content.set(String::new());
+                        sync();
+                    },
+                }
                 Composer { content, initial: args.draft.clone() }
             }
         }

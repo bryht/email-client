@@ -222,6 +222,25 @@ fn parse_imap_day(s: &str) -> Option<i64> {
     Some(days_to_ts(y, m, d))
 }
 
+/// `SEARCH HEADER 字段 值`：Message-ID 按值精确比较（忽略尖括号），其他字段按子串匹配。
+fn header_matches(m: &StoredMessage, field: &str, value: &str) -> bool {
+    if field == "message-id" {
+        let want = value.trim().trim_start_matches('<').trim_end_matches('>');
+        return m.email.message_id.as_deref() == Some(want);
+    }
+    let end = m
+        .raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(m.raw.len());
+    String::from_utf8_lossy(&m.raw[..end])
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .any(|(k, v)| {
+            k.trim().eq_ignore_ascii_case(field) && v.to_lowercase().contains(&value.to_lowercase())
+        })
+}
+
 fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -446,6 +465,7 @@ impl Session {
         let max_uid = msgs.last().map(|m| m.n).unwrap_or(0);
         let mut since: Option<i64> = None;
         let mut uid_ranges: Option<Vec<(u64, u64)>> = None;
+        let mut header: Option<(String, String)> = None;
         let mut i = 0;
         while i < args.len() {
             match args[i].to_ascii_uppercase().as_str() {
@@ -461,6 +481,13 @@ impl Session {
                     uid_ranges = args.get(i + 1).map(|s| parse_set(s, max_uid));
                     i += 1;
                 }
+                "HEADER" => {
+                    let (Some(field), Some(value)) = (args.get(i + 1), args.get(i + 2)) else {
+                        return self.send(&format!("{tag} BAD Could not parse command"));
+                    };
+                    header = Some((field.to_ascii_lowercase(), value.clone()));
+                    i += 2;
+                }
                 other => {
                     return self.send(&format!("{tag} BAD Unsupported search key {other}"));
                 }
@@ -472,6 +499,7 @@ impl Session {
             .enumerate()
             .filter(|(_, m)| since.is_none_or(|s| m.email.timestamp.unwrap_or(0) >= s))
             .filter(|(_, m)| uid_ranges.as_ref().is_none_or(|r| in_set(r, m.n)))
+            .filter(|(_, m)| header.as_ref().is_none_or(|(f, v)| header_matches(m, f, v)))
             .map(|(pos, m)| if uid { m.n } else { pos as u64 + 1 }.to_string())
             .collect();
         if hits.is_empty() {

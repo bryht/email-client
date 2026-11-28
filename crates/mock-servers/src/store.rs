@@ -162,6 +162,27 @@ impl Mailbox {
         self.change(n, |m| m.seen = seen)
     }
 
+    /// 替换原文和/或移动文件夹（例如修改草稿、发送草稿）。
+    pub fn update(&self, n: u64, folder: Option<Folder>, raw: Option<Vec<u8>>) -> bool {
+        let parsed = match raw {
+            Some(raw) => match Email::parse(&raw) {
+                Ok(email) => Some((raw, email)),
+                Err(_) => return false,
+            },
+            None => None,
+        };
+        self.change(n, |m| {
+            if let Some((raw, email)) = parsed {
+                m.raw = raw;
+                m.email = email;
+            }
+            if let Some(f) = folder {
+                m.folder = f;
+                m.seen = true;
+            }
+        })
+    }
+
     /// 修改一封未删除的邮件；只有真的找到时才推进版本号。
     fn change(&self, n: u64, f: impl FnOnce(&mut StoredMessage)) -> bool {
         let mut d = self.lock();

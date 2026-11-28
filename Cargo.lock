@@ -2949,6 +2949,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "mail-core",
+ "mail-sync",
  "serde",
  "serde_json",
  "similar",
@@ -3179,6 +3180,7 @@ dependencies = [
  "tokio-rustls",
  "ureq",
  "uuid",
+ "webbrowser",
  "webpki-roots",
 ]
 

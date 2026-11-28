@@ -9,7 +9,9 @@
 //! - 发信后 Gmail 会自动存入“已发送”，客户端不再另存。
 
 use crate::SyncError;
+use crate::compose::{ReplyDraft, build_reply};
 use crate::maildir::{SyncState, SyncStats};
+use crate::send::{SendReport, SendStatus};
 use async_imap::Client;
 use async_imap::types::NameAttribute;
 use futures_util::StreamExt;
@@ -33,6 +35,8 @@ pub struct GmailConfig {
     pub app_password: String,
     /// 只同步最近多少天的邮件；为空时同步全部。
     pub since_days: Option<u32>,
+    /// 发送结果不明时，到“已发送”核对前的等待时间（Gmail 保存已发送需要一点时间）。
+    pub verify_delay: std::time::Duration,
 }
 
 impl GmailConfig {
@@ -47,6 +51,7 @@ impl GmailConfig {
             user: user.into(),
             app_password: app_password.into(),
             since_days: Some(90),
+            verify_delay: std::time::Duration::from_secs(2),
         }
     }
 
@@ -67,6 +72,7 @@ impl GmailConfig {
             user: user.into(),
             app_password: app_password.into(),
             since_days: None,
+            verify_delay: std::time::Duration::ZERO,
         }
     }
 }
@@ -312,6 +318,94 @@ pub fn send_gmail(
         }
     })?;
     Ok(())
+}
+
+async fn find_in_sent<T>(
+    mut client: Client<T>,
+    config: &GmailConfig,
+    message_id: &str,
+) -> Result<bool, SyncError>
+where
+    T: AsyncRead + AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    let _ = client.read_response().await;
+    let mut session = client
+        .login(&config.user, &config.app_password)
+        .await
+        .map_err(|(e, _)| SyncError::Auth(format!("请检查 Gmail 地址和应用专用密码（{e}）")))?;
+    let mut sent = None;
+    {
+        let mut names = session.list(None, Some("*")).await.map_err(imap_err)?;
+        while let Some(name) = names.next().await {
+            let name = name.map_err(imap_err)?;
+            if name
+                .attributes()
+                .iter()
+                .any(|a| matches!(a, NameAttribute::Sent))
+            {
+                sent = Some(name.name().to_string());
+            }
+        }
+    }
+    let Some(sent) = sent else {
+        return Err(SyncError::Protocol("找不到“已发送”文件夹".into()));
+    };
+    session.select(&sent).await.map_err(imap_err)?;
+    let hits = session
+        .uid_search(format!("HEADER Message-ID \"<{message_id}>\""))
+        .await
+        .map_err(imap_err)?;
+    let _ = session.logout().await;
+    Ok(!hits.is_empty())
+}
+
+/// “已发送”中是否有这封邮件（按 Message-ID 查找）。
+pub fn find_sent_gmail(config: &GmailConfig, message_id: &str) -> Result<bool, SyncError> {
+    let rt = runtime()?;
+    rt.block_on(async {
+        let tcp = TcpStream::connect((config.imap_host.as_str(), config.imap_port))
+            .await
+            .map_err(|e| {
+                SyncError::Network(format!(
+                    "无法连接 {}:{}：{e}",
+                    config.imap_host, config.imap_port
+                ))
+            })?;
+        if config.tls {
+            let tls = tls_connect(&config.imap_host, tcp).await?;
+            find_in_sent(Client::new(tls), config, message_id).await
+        } else {
+            find_in_sent(Client::new(tcp), config, message_id).await
+        }
+    })
+}
+
+/// 回复一封邮件：生成 MIME（含线程信息）并经 SMTP 发出；没有确认时到“已发送”核对。
+pub fn reply_gmail(
+    config: &GmailConfig,
+    original: &mail_core::Email,
+    from: &mail_core::Mailbox,
+    draft: &ReplyDraft,
+) -> Result<SendReport, SyncError> {
+    let built = build_reply(original, from, draft)?;
+    let status = match send_gmail(config, &from.address, &built.recipients, &built.raw) {
+        Ok(()) => SendStatus::Sent,
+        // 账号或收件人被拒：没有发出。
+        Err(e @ SyncError::Auth(_)) => return Err(e),
+        Err(error) => {
+            std::thread::sleep(config.verify_delay);
+            match find_sent_gmail(config, &built.message_id) {
+                Ok(true) => SendStatus::SentConfirmedAfterError,
+                Ok(false) => SendStatus::NotSent(error.to_string()),
+                Err(e) => SendStatus::MaybeSent(format!("{error}；核对“已发送”也失败：{e}")),
+            }
+        }
+    };
+    Ok(SendReport {
+        message_id: built.message_id,
+        draft_id: None,
+        status,
+    })
 }
 
 #[cfg(test)]

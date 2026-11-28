@@ -13,8 +13,14 @@
 //! - `PATCH /v1.0/me/messages/{id}`：`{"isRead": bool}`
 //! - `POST /v1.0/me/sendMail`：发信并存入“已发送”
 //!
+//! - `POST /v1.0/me/messages/{id}/createReplyAll`：生成带线程信息的回复草稿
+//! - `PATCH /v1.0/me/messages/{id}`：草稿可改 `toRecipients`、`ccRecipients`、`subject`、`body`
+//! - `POST /v1.0/me/messages/{id}/send`：发送草稿（移入“已发送”）
+//! - `GET  /v1.0/me/mailFolders/{folder}/messages?$filter=internetMessageId eq '<…>'`
+//!
 //! 测试用的管理接口：`POST /mock/deliver`（请求体为一封 `.eml`，投递到收件箱）、
-//! `POST /mock/delete/{id}`、`POST /mock/expire-tokens`（让所有访问令牌失效）。
+//! `POST /mock/delete/{id}`、`POST /mock/expire-tokens`（让所有访问令牌失效）、
+//! `POST /mock/drop-next-send`（下一次发送照常发出但返回 503）。
 
 use crate::store::{Folder, Mailbox, StoredMessage, iso8601};
 use base64::Engine;
@@ -42,6 +48,8 @@ struct AuthState {
     codes: HashMap<String, CodeGrant>,
     access: HashSet<String>,
     refresh: HashMap<String, String>,
+    /// 下一次发送时服务器照常发出，但返回 503（模拟“已发出但客户端没收到确认”）。
+    drop_next_send: bool,
 }
 
 /// 运行中的模拟服务。丢弃时停止。
@@ -219,6 +227,12 @@ fn handle(mut request: Request, mailbox: &Mailbox, auth: &Mutex<AuthState>, base
                 Some(n) if mailbox.delete(n) => json_response(200, &json!({})),
                 _ => graph_error(404, "ErrorItemNotFound", "not found"),
             },
+            (Method::Post, ["drop-next-send"]) => {
+                auth.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .drop_next_send = true;
+                json_response(200, &json!({}))
+            }
             (Method::Post, ["expire-tokens"]) => {
                 auth.lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -277,17 +291,62 @@ fn handle(mut request: Request, mailbox: &Mailbox, auth: &Mutex<AuthState>, base
         }),
         (Method::Patch, ["v1.0", "me", "messages", id]) => {
             let body: Value = serde_json::from_slice(&read_body(&mut request)).unwrap_or_default();
-            match (parse_id(id), body.get("isRead").and_then(Value::as_bool)) {
-                (Some(n), Some(read)) if mailbox.set_seen(n, read) => {
-                    with_message(mailbox, id, |m| json_response(200, &message_json(m)))
+            patch_message(mailbox, id, &body)
+        }
+        (Method::Post, ["v1.0", "me", "messages", id, "createReplyAll"]) => {
+            create_reply_all(mailbox, id)
+        }
+        (Method::Post, ["v1.0", "me", "messages", id, "send"]) => {
+            let drop = std::mem::take(
+                &mut auth
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .drop_next_send,
+            );
+            let (messages, _) = mailbox.snapshot();
+            match parse_id(id).and_then(|n| messages.iter().find(|m| m.n == n && !m.deleted)) {
+                Some(m) if m.folder == Folder::Drafts => {
+                    mailbox.update(m.n, Some(Folder::Sent), None);
+                    if drop {
+                        graph_error(
+                            503,
+                            "ServiceUnavailable",
+                            "The service is temporarily unavailable.",
+                        )
+                    } else {
+                        Response::from_data(Vec::new()).with_status_code(202)
+                    }
                 }
-                (Some(_), None) => graph_error(400, "BadRequest", "only isRead is supported"),
-                _ => graph_error(404, "ErrorItemNotFound", "not found"),
+                Some(_) => graph_error(400, "ErrorInvalidOperation", "only drafts can be sent"),
+                None => graph_error(404, "ErrorItemNotFound", "not found"),
+            }
+        }
+        (Method::Get, ["v1.0", "me", "mailFolders", folder, "messages"]) => {
+            match Folder::from_graph_name(folder) {
+                Some(f) => {
+                    let wanted = params
+                        .get("$filter")
+                        .and_then(|f| f.strip_prefix("internetMessageId eq '"))
+                        .and_then(|f| f.strip_suffix('\''))
+                        .map(String::from);
+                    let (messages, _) = mailbox.snapshot();
+                    let items: Vec<Value> = messages
+                        .iter()
+                        .filter(|m| m.folder == f && !m.deleted)
+                        .map(message_json)
+                        .filter(|j| match &wanted {
+                            Some(w) => j["internetMessageId"].as_str() == Some(w.as_str()),
+                            None => true,
+                        })
+                        .collect();
+                    json_response(200, &json!({ "value": items }))
+                }
+                None => graph_error(404, "ErrorItemNotFound", "folder not found"),
             }
         }
         (Method::Post, ["v1.0", "me", "sendMail"]) => {
             let body: Value = serde_json::from_slice(&read_body(&mut request)).unwrap_or_default();
-            match build_mime(&body["message"], &mailbox.owner()) {
+            match build_mime(&body["message"], &mailbox.owner(), &Threading::fresh()) {
                 Some(raw) => {
                     if body.get("saveToSentItems").and_then(Value::as_bool) != Some(false) {
                         mailbox.record_sent(raw);
@@ -480,8 +539,132 @@ fn delta(
     json_response(200, &body)
 }
 
+/// 生成 MIME 时的线程信息。
+struct Threading {
+    message_id: String,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
+}
+
+impl Threading {
+    fn fresh() -> Self {
+        Self {
+            message_id: format!("{}@mock.graph", token()),
+            in_reply_to: None,
+            references: Vec::new(),
+        }
+    }
+}
+
+fn recipients_of(list: &[mail_core::Mailbox]) -> Value {
+    Value::Array(
+        list.iter()
+            .map(|m| json!({ "emailAddress": { "name": m.display_name(), "address": m.address } }))
+            .collect(),
+    )
+}
+
+/// 生成回复全部的草稿：收件人为原信的 Reply-To（没有时为发件人），抄送为原信其他收件人，去掉自己。
+fn create_reply_all(mailbox: &Mailbox, id: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let (messages, _) = mailbox.snapshot();
+    let Some(orig) = parse_id(id).and_then(|n| messages.iter().find(|m| m.n == n && !m.deleted))
+    else {
+        return graph_error(404, "ErrorItemNotFound", "not found");
+    };
+    let owner = mailbox.owner();
+    let reply = orig
+        .email
+        .reply_all_recipients(std::slice::from_ref(&owner.0));
+    let subject = if orig.email.subject.to_lowercase().starts_with("re:") {
+        orig.email.subject.clone()
+    } else {
+        format!("Re: {}", orig.email.subject)
+    };
+    let message = json!({
+        "subject": subject,
+        "body": { "contentType": "HTML", "content": "" },
+        "toRecipients": recipients_of(&reply.to),
+        "ccRecipients": recipients_of(&reply.cc),
+    });
+    let mut references = orig.email.references.clone();
+    if let Some(mid) = &orig.email.message_id {
+        references.push(mid.clone());
+    }
+    let threading = Threading {
+        message_id: format!("{}@mock.graph", token()),
+        in_reply_to: orig.email.message_id.clone(),
+        references,
+    };
+    let Some(raw) = build_mime(&message, &owner, &threading) else {
+        return graph_error(
+            400,
+            "ErrorInvalidRecipients",
+            "original message has no recipients to reply to",
+        );
+    };
+    match mailbox.append(Folder::Drafts, raw) {
+        Some(n) => {
+            let (messages, _) = mailbox.snapshot();
+            let m = messages.iter().find(|m| m.n == n).expect("just added");
+            json_response(201, &message_json(m))
+        }
+        None => graph_error(500, "ErrorInternalServerError", "could not create draft"),
+    }
+}
+
+/// 修改邮件：任何邮件都可改 `isRead`；草稿还可改收件人、主题和正文（保留线程信息与 Message-ID）。
+fn patch_message(mailbox: &Mailbox, id: &str, body: &Value) -> Response<std::io::Cursor<Vec<u8>>> {
+    let (messages, _) = mailbox.snapshot();
+    let Some(m) = parse_id(id).and_then(|n| messages.iter().find(|m| m.n == n && !m.deleted))
+    else {
+        return graph_error(404, "ErrorItemNotFound", "not found");
+    };
+    let n = m.n;
+    if let Some(read) = body.get("isRead").and_then(Value::as_bool) {
+        mailbox.set_seen(n, read);
+    }
+    let edits = ["toRecipients", "ccRecipients", "subject", "body"];
+    if edits.iter().any(|k| body.get(*k).is_some()) {
+        if m.folder != Folder::Drafts {
+            return graph_error(400, "ErrorInvalidOperation", "only drafts can be edited");
+        }
+        let e = &m.email;
+        let (text_type, text) = if e.html.trim().is_empty() {
+            ("Text", e.body.clone())
+        } else {
+            ("HTML", e.html.clone())
+        };
+        let mut message = json!({
+            "subject": e.subject,
+            "body": { "contentType": text_type, "content": text },
+            "toRecipients": recipients_of(&e.to),
+            "ccRecipients": recipients_of(&e.cc),
+        });
+        for k in edits {
+            if let Some(v) = body.get(k) {
+                message[k] = v.clone();
+            }
+        }
+        let threading = Threading {
+            message_id: e
+                .message_id
+                .clone()
+                .unwrap_or_else(|| format!("{}@mock.graph", token())),
+            in_reply_to: e.in_reply_to.first().cloned(),
+            references: e.references.clone(),
+        };
+        let Some(raw) = build_mime(&message, &mailbox.owner(), &threading) else {
+            return graph_error(400, "ErrorInvalidRecipients", "draft needs toRecipients");
+        };
+        mailbox.update(n, None, Some(raw));
+    } else if body.get("isRead").is_none() {
+        return graph_error(400, "BadRequest", "nothing to update");
+    }
+    with_message(mailbox, id, |m| json_response(200, &message_json(m)))
+}
+
 /// 根据 Graph 的 message JSON 生成 MIME 原文（纯文本或 HTML 正文）。
-fn build_mime(message: &Value, owner: &(String, String)) -> Option<Vec<u8>> {
+fn build_mime(message: &Value, owner: &(String, String), threading: &Threading) -> Option<Vec<u8>> {
     let addrs = |key: &str| -> Vec<String> {
         message[key]
             .as_array()
@@ -517,10 +700,21 @@ fn build_mime(message: &Value, owner: &(String, String)) -> Option<Vec<u8>> {
     if !cc.is_empty() {
         raw.push_str(&format!("Cc: {}\r\n", cc.join(", ")));
     }
+    if let Some(parent) = &threading.in_reply_to {
+        raw.push_str(&format!("In-Reply-To: <{parent}>\r\n"));
+    }
+    if !threading.references.is_empty() {
+        let refs: Vec<String> = threading
+            .references
+            .iter()
+            .map(|r| format!("<{r}>"))
+            .collect();
+        raw.push_str(&format!("References: {}\r\n", refs.join(" ")));
+    }
     raw.push_str(&format!(
-        "Subject: {subject}\r\nDate: {d:02} {} {y} {h:02}:{mi:02}:{s:02} +0000\r\nMessage-ID: <{}@mock.graph>\r\nMIME-Version: 1.0\r\nContent-Type: {content_type}; charset=utf-8\r\n\r\n{content}\r\n",
+        "Subject: {subject}\r\nDate: {d:02} {} {y} {h:02}:{mi:02}:{s:02} +0000\r\nMessage-ID: <{}>\r\nMIME-Version: 1.0\r\nContent-Type: {content_type}; charset=utf-8\r\n\r\n{content}\r\n",
         crate::store::MONTHS[(mo - 1) as usize],
-        token()
+        threading.message_id
     ));
     Some(raw.into_bytes())
 }

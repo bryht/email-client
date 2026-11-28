@@ -9,11 +9,14 @@
 //!
 //! 可以对着 `mock-servers` 的模拟服务开发与测试，换成真实地址即可连接真实账号。
 
+pub mod account;
+pub mod compose;
 pub mod credentials;
 pub mod gmail;
 pub mod maildir;
 pub mod oauth;
 pub mod outlook;
+pub mod send;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {

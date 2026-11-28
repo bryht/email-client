@@ -22,7 +22,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 | M0 | AI 命令行原型 | 完成；Ollama、Codex、Windows 真机实测待具备条件的环境补做 |
 | M1 | Dioxus 界面原型：Rust 自研富文本编辑器、HTML 邮件隔离 | 进行中：两项高风险验证已通过，见“M1 进展” |
 | M2 | 收信与按人浏览（Outlook / Graph、Gmail / IMAP） | 进行中：对话归组已完成，见“M2 进展” |
-| M3 | 发信与草稿同步 | 未开始 |
+| M3 | 发信与草稿同步 | 进行中：回信发送已完成，见“M3 进展” |
 | M4 | 多账号、Outlook 日历（只读）、签名、通知与托盘 | 未开始 |
 | M5 | 签名安装包，GitHub Releases 与 winget 发布 | 未开始 |
 
@@ -126,11 +126,29 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 - 凭据管理器不可用时（例如没有 D-Bus 的 Linux）给出提示，照常同步，只是不保存。
 - 已在真实的 Secret Service（gnome-keyring + D-Bus）下验证：第一次登录后保存；第二、三次不再打开浏览器、不再输入密码；`--forget` 后条目被删除。
 
+### M3 进展
+
+**回信发送**——**已完成，对着模拟服务验证**：
+- `mail-sync/src/compose.rs`：用 lettre 生成回信 MIME。主题加 `Re:`（不重复），`In-Reply-To` / `References` 让回信进入对方的原线程，纯文本 + HTML 两部分，事先生成 `Message-ID`；非 ASCII 的主题和名字按标准编码。
+- Outlook（`outlook.rs`）：`createReplyAll` 生成带线程信息的草稿 → `PATCH` 写入用户确认的收件人和正文 → 发送草稿。
+- Gmail（`gmail.rs`）：经 SMTP 发出；Gmail 自动存入“已发送”。
+- 发送中断（`send.rs`，PLAN 第 1 节）：发送出错或没有收到确认时，按 Message-ID 到“已发送”核对，结果为“已发送”、“已发送（核对后确认）”、“未发送（可重试）”或“可能已发送（核对也失败，由用户决定）”。模拟服务可以制造“服务器发出了但客户端没收到确认”（Graph 返回 503、SMTP 不回 250 就断开），四种结果都有测试。
+- 账号文件（`mail-sync/src/account.rs`）：JSON 只写“连到哪里”（Outlook / Gmail、地址、模拟服务地址），机密来自凭据管理器或环境变量；命令行与桌面共用其中的同步和回信逻辑。
+- 桌面界面：`--account 账号.json --mailbox 目录` 时，左栏上方有“同步”按钮；右栏有“收件人”“抄送”（默认回复所有人：Reply-To 优先、去掉自己）和“发送”，显示上述四种结果，未发送或可能已发送时可“重试”；发送成功后清空写信框并自动同步，回信出现在时间线里。
+- 发送时直接读取编辑区内容：端到端测试发现，输入后立即点“发送”时，最后一个字可能还没同步到 Rust 一侧；已改为发送时直接读取，并给输入同步加序号丢弃过时结果。
+- `scripts/desktop-send-test.sh`：启动模拟服务 → 同步 → 在桌面界面输入并点“发送” → 用 IMAP 检查“已发送”中的回信（线程信息、收件人、正文），已加入 Linux CI。
+
+**M3 待做**：
+1. 草稿同步：写到一半的回信保存到服务商的草稿箱（Outlook 用 Graph 草稿，Gmail 用 IMAP `APPEND` 到 `[Gmail]/Drafts`），重新打开时恢复；与 PLAN 第 1 节“草稿在别处被改”的规则一起做。
+2. 新建邮件（不是回复）与 `mailto:` 链接在应用内写信（M1 待做第 4 项）。
+3. 撤销发送、签名、选择发件地址（PLAN 第 3 节“写信与收发”）。
+4. Outlook 的“重试”目前会重新生成一份草稿；应改为重发同一份草稿（`send_draft`）。
+
 ### 下一步
 
-1. **发信接入界面**（M3 的开头）：写信框加“发送”，按 PLAN 第 1 节“默认回复所有人”生成 MIME（In-Reply-To / References、文本与 HTML 两部分），Outlook 走 Graph `sendMail`、Gmail 走 `send_gmail`；发送前用 `Message-ID` 记录，发送结果不明时到“已发送”核对（PLAN 第 1 节“发送中断”）。
-2. **本地存储**（M2 待做第 3 项）：SQLite 保存邮件与同步状态，替代 `.eml` 目录 + `sync-state.json`。
-3. **界面接入同步**：桌面界面里添加账号、后台同步、新邮件出现在对话列表。
+1. **本地存储**（M2 待做第 3 项）：SQLite 保存邮件与同步状态，替代 `.eml` 目录 + `sync-state.json`，为草稿同步、未读状态和全文搜索打基础。
+2. **M3 待做第 1 项（草稿同步）**。
+3. 桌面界面里添加账号（目前用账号文件）和后台定时同步。
 
 M1 剩下的待做事项需要 Windows / macOS 真机；M0 未完成的三项可在具备条件的环境中随时补做。
 
@@ -230,6 +248,10 @@ cargo run -p mock-servers --bin letterdesk-mock -- --mailbox samples --me lin@ex
 cargo run -p letterdesk-cli -- sync outlook --base http://127.0.0.1:8901 \
   --client-id 00000000-1e77-4de5-8000-000000000001 --out mail/   # 浏览器里会自动完成模拟登录
 cargo run -p letterdesk-desktop -- --mailbox mail/ --me lin@example.com
+
+# 在桌面界面里同步和回信：写一个账号文件，再用 --account 打开
+echo '{"kind":"gmail","address":"lin@example.com","mock":"127.0.0.1:1143:1025","days":0}' > account.json
+LETTERDESK_GMAIL_APP_PASSWORD="abcd efgh ijkl mnop" cargo run -p letterdesk-desktop -- --mailbox gmail/ --account account.json
 
 # Gmail（IMAP）同样可以对着模拟服务同步：
 LETTERDESK_GMAIL_APP_PASSWORD="abcd efgh ijkl mnop" cargo run -p letterdesk-cli -- \

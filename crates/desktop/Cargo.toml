@@ -24,3 +24,4 @@ similar.workspace = true
 dirs = "7"
 serde.workspace = true
 conversation.workspace = true
+mail-sync = { path = "../mail-sync" }

@@ -110,9 +110,15 @@ pub fn Composer(props: ComposerProps) -> Element {
         }
     });
 
-    let sync = move || {
+    // 每次输入都异步读回编辑区；用序号丢弃过时的结果，避免较早的读回覆盖较新的内容。
+    let mut seq = use_signal(|| 0u64);
+    let mut sync = move || {
+        let mine = *seq.peek() + 1;
+        seq.set(mine);
         spawn(async move {
-            if let Some(raw) = read_editor_html().await {
+            if let Some(raw) = read_editor_html().await
+                && *seq.peek() == mine
+            {
                 content.set(clean_composer_html(&raw));
             }
         });

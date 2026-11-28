@@ -1,8 +1,10 @@
 //! Microsoft Graph 邮件同步客户端（同步调用，适合在后台线程中使用）。
 
 use crate::SyncError;
+use crate::compose::ReplyDraft;
 use crate::oauth::{OutlookConfig, Tokens, refresh};
-use serde_json::Value;
+use crate::send::{SendReport, SendStatus};
+use serde_json::{Value, json};
 
 /// 一封邮件的摘要（来自 delta 结果）。
 #[derive(Debug, Clone, PartialEq)]
@@ -177,5 +179,139 @@ impl OutlookClient {
         res.body_mut()
             .read_to_vec()
             .map_err(|e| SyncError::Network(e.to_string()))
+    }
+
+    /// POST / PATCH 请求（JSON 请求体可选）；返回状态码和 JSON（没有内容时为 Null）。
+    /// 返回 401 时刷新令牌并重试一次。
+    fn call(
+        &mut self,
+        method: &str,
+        url: &str,
+        body: Option<&Value>,
+    ) -> Result<(u16, Value), SyncError> {
+        if self.tokens.is_expired() {
+            self.refresh_tokens()?;
+        }
+        for attempt in 0..2 {
+            let auth = format!("Bearer {}", self.tokens.access_token);
+            let result = match (method, body) {
+                ("PATCH", Some(b)) => self
+                    .agent
+                    .patch(url)
+                    .header("Authorization", &auth)
+                    .send_json(b),
+                ("PATCH", None) => self
+                    .agent
+                    .patch(url)
+                    .header("Authorization", &auth)
+                    .send_empty(),
+                (_, Some(b)) => self
+                    .agent
+                    .post(url)
+                    .header("Authorization", &auth)
+                    .send_json(b),
+                (_, None) => self
+                    .agent
+                    .post(url)
+                    .header("Authorization", &auth)
+                    .send_empty(),
+            };
+            let mut res = result.map_err(|e| SyncError::Network(e.to_string()))?;
+            let status = res.status().as_u16();
+            if status == 401 && attempt == 0 {
+                self.refresh_tokens()?;
+                continue;
+            }
+            let text = res.body_mut().read_to_string().unwrap_or_default();
+            let value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            return Ok((status, value));
+        }
+        unreachable!()
+    }
+
+    fn recipients(list: &[mail_core::Mailbox]) -> Value {
+        Value::Array(
+            list.iter()
+                .map(|m| json!({ "emailAddress": { "name": m.display_name(), "address": m.address } }))
+                .collect(),
+        )
+    }
+
+    /// 回复全部：先用 `createReplyAll` 生成带线程信息的草稿，写入用户确认的收件人和正文，再发送。
+    /// `original_id` 是原信的 Graph id（同步目录中的文件名）。
+    pub fn reply_all(
+        &mut self,
+        original_id: &str,
+        draft: &ReplyDraft,
+    ) -> Result<SendReport, SyncError> {
+        let base = format!("{}/v1.0/me/messages", self.config.graph);
+        let (status, created) = self.call(
+            "POST",
+            &format!("{base}/{original_id}/createReplyAll"),
+            Some(&json!({})),
+        )?;
+        if status != 201 && status != 200 {
+            return Err(SyncError::Protocol(format!(
+                "无法生成回复草稿：{status} {}",
+                created["error"]["code"]
+            )));
+        }
+        let draft_id = created["id"].as_str().unwrap_or_default().to_string();
+        let message_id = created["internetMessageId"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_matches(['<', '>'])
+            .to_string();
+        let patch = json!({
+            "toRecipients": Self::recipients(&draft.to),
+            "ccRecipients": Self::recipients(&draft.cc),
+            "body": { "contentType": "HTML", "content": draft.html },
+        });
+        let (status, body) = self.call("PATCH", &format!("{base}/{draft_id}"), Some(&patch))?;
+        if status != 200 {
+            return Err(SyncError::Protocol(format!(
+                "无法保存回复草稿：{status} {}",
+                body["error"]["code"]
+            )));
+        }
+        let status = self.send_draft(&draft_id, &message_id);
+        Ok(SendReport {
+            message_id,
+            draft_id: Some(draft_id),
+            status,
+        })
+    }
+
+    /// 发送一份草稿；失败或没有确认时到“已发送”核对。也用于“重试”。
+    pub fn send_draft(&mut self, draft_id: &str, message_id: &str) -> SendStatus {
+        let url = format!("{}/v1.0/me/messages/{draft_id}/send", self.config.graph);
+        let error = match self.call("POST", &url, None) {
+            Ok((202, _)) | Ok((200, _)) => return SendStatus::Sent,
+            Ok((status, body)) if status < 500 => {
+                return SendStatus::NotSent(format!(
+                    "服务器拒绝发送：{status} {}",
+                    body["error"]["code"]
+                ));
+            }
+            Ok((status, _)) => format!("服务器返回 {status}"),
+            Err(e) => e.to_string(),
+        };
+        match self.find_sent(message_id) {
+            Ok(true) => SendStatus::SentConfirmedAfterError,
+            Ok(false) => SendStatus::NotSent(error),
+            Err(e) => SendStatus::MaybeSent(format!("{error}；核对“已发送”也失败：{e}")),
+        }
+    }
+
+    /// “已发送”中是否有这封邮件。
+    pub fn find_sent(&mut self, message_id: &str) -> Result<bool, SyncError> {
+        let filter = format!("internetMessageId eq '<{message_id}>'");
+        let encoded: String = form_urlencoded::byte_serialize(filter.as_bytes()).collect();
+        let url = format!(
+            "{}/v1.0/me/mailFolders/sentitems/messages?$filter={encoded}&$select=id",
+            self.config.graph
+        );
+        let body = self.get_json(&url)?;
+        Ok(body["value"].as_array().is_some_and(|v| !v.is_empty()))
     }
 }

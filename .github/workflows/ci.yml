@@ -41,6 +41,13 @@ jobs:
           EGL_LOG_LEVEL: fatal
           ARTIFACT_DIR: ${{ runner.temp }}/desktop-artifacts
         run: xvfb-run -a -s "-screen 0 1280x820x24" scripts/desktop-link-test.sh
+      - name: Desktop send test (reply through the Gmail mock)
+        if: runner.os == 'Linux'
+        env:
+          EGL_LOG_LEVEL: fatal
+        run: |
+          cargo build -p mock-servers -p letterdesk-cli -p letterdesk-desktop
+          xvfb-run -a -s "-screen 0 1280x820x24" scripts/desktop-send-test.sh
       - name: Upload desktop test artifacts
         if: failure() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4

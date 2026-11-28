@@ -24,6 +24,7 @@ pub struct Envelope {
 pub struct SmtpMock {
     pub port: u16,
     sent: Arc<Mutex<Vec<Envelope>>>,
+    drop_next: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -32,6 +33,12 @@ impl SmtpMock {
     /// 目前为止收到的所有邮件（含信封收件人，包括 Bcc）。
     pub fn sent(&self) -> Vec<Envelope> {
         self.sent.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// 下一封邮件照常收下并存入“已发送”，但在回复 250 之前断开连接
+    /// （模拟“已发出但客户端没收到确认”）。
+    pub fn drop_next_after_data(&self) {
+        self.drop_next.store(true, Ordering::SeqCst);
     }
 }
 
@@ -50,16 +57,17 @@ pub fn start(mailbox: Mailbox, addr: &str) -> std::io::Result<SmtpMock> {
     let port = listener.local_addr()?.port();
     let stop = Arc::new(AtomicBool::new(false));
     let sent = Arc::new(Mutex::new(Vec::new()));
-    let (stop2, sent2) = (stop.clone(), sent.clone());
+    let drop_next = Arc::new(AtomicBool::new(false));
+    let (stop2, sent2, drop2) = (stop.clone(), sent.clone(), drop_next.clone());
     let thread = std::thread::spawn(move || {
         for stream in listener.incoming() {
             if stop2.load(Ordering::SeqCst) {
                 break;
             }
             if let Ok(stream) = stream {
-                let (mb, sent) = (mailbox.clone(), sent2.clone());
+                let (mb, sent, drop) = (mailbox.clone(), sent2.clone(), drop2.clone());
                 std::thread::spawn(move || {
-                    let _ = session(mb, sent, stream);
+                    let _ = session(mb, sent, drop, stream);
                 });
             }
         }
@@ -67,6 +75,7 @@ pub fn start(mailbox: Mailbox, addr: &str) -> std::io::Result<SmtpMock> {
     Ok(SmtpMock {
         port,
         sent,
+        drop_next,
         stop,
         thread: Some(thread),
     })
@@ -85,6 +94,7 @@ fn b64(s: &str) -> String {
 fn session(
     mailbox: Mailbox,
     sent: Arc<Mutex<Vec<Envelope>>>,
+    drop_next: Arc<AtomicBool>,
     stream: TcpStream,
 ) -> std::io::Result<()> {
     let mut out = stream.try_clone()?;
@@ -187,6 +197,11 @@ fn session(
                     recipients: std::mem::take(&mut rcpts),
                     raw,
                 });
+            if drop_next.swap(false, Ordering::SeqCst) {
+                // 已经收下，但不回复确认就断开。
+                let _ = out.shutdown(std::net::Shutdown::Both);
+                return Ok(());
+            }
             send(&mut out, "250 2.0.0 OK mock - gsmtp")?;
         } else if upper == "RSET" {
             from = None;
