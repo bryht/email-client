@@ -22,6 +22,8 @@ pub struct Email {
     pub reply_to: Vec<Mailbox>,
     /// RFC 3339 格式的发送时间。
     pub date: Option<String>,
+    /// 发送时间的 Unix 时间戳（秒，UTC），用于排序。
+    pub timestamp: Option<i64>,
     pub in_reply_to: Vec<String>,
     pub references: Vec<String>,
     /// 纯文本正文；只有 HTML 时由解析器转换为文本。
@@ -57,6 +59,7 @@ impl Email {
             cc: mailboxes(msg.cc()),
             reply_to: mailboxes(msg.reply_to()),
             date: msg.date().map(|d| d.to_rfc3339()),
+            timestamp: msg.date().map(|d| d.to_timestamp()),
             in_reply_to: text_list(msg.in_reply_to()),
             references: text_list(msg.references()),
             body: msg
@@ -149,6 +152,7 @@ On Mon, 2 Mar 2026 at 09:00, Maya <maya@example.com> wrote:\r\n\
         assert_eq!(email.to.len(), 1);
         assert_eq!(email.cc[0].address, "alex@example.com");
         assert_eq!(email.message_id.as_deref(), Some("m2@example.com"));
+        assert_eq!(email.timestamp, Some(1_772_532_000));
         assert_eq!(email.in_reply_to, vec!["m1@example.com"]);
         assert_eq!(
             email.new_content(),

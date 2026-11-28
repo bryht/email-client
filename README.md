@@ -21,7 +21,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 |---|---|---|
 | M0 | AI 命令行原型 | 完成；Ollama、Codex、Windows 真机实测待具备条件的环境补做 |
 | M1 | Dioxus 界面原型：Rust 自研富文本编辑器、HTML 邮件隔离 | 进行中：两项高风险验证已通过，见“M1 进展” |
-| M2 | 收信与按人浏览（Outlook / Graph、Gmail / IMAP） | 未开始 |
+| M2 | 收信与按人浏览（Outlook / Graph、Gmail / IMAP） | 进行中：对话归组已完成，见“M2 进展” |
 | M3 | 发信与草稿同步 | 未开始 |
 | M4 | 多账号、Outlook 日历（只读）、签名、通知与托盘 | 未开始 |
 | M5 | 签名安装包，GitHub Releases 与 winget 发布 | 未开始 |
@@ -77,14 +77,29 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 4. `mailto:` 链接目前交给系统的邮件程序；应改为在 Letterdesk 里新建写给该地址的邮件（依赖 M3 的新建邮件流程）。
 5. Windows 和 macOS 上运行 `--selftest`（目前只在 Linux CI 上跑）。
 
+### M2 进展
+
+**对话归组**（`crates/conversation`）：实现 PLAN 第 2 节“新来的一封信放到哪儿”。`group(邮件, 自己的地址)` 是纯函数，每次同步后可整体重算：
+
+- 回复跟随父邮件，中途增减 Cc 也不拆分；
+- 转发一律新开对话并记录来源对话（`forwarded_from`），对转发的后续回复留在新对话，即使又抄送了原来的参与人；
+- 另起的新邮件按直接参与人（发件人和 To，去掉自己及别名，地址不区分大小写）匹配，只增减 Cc 时沿用同一对话；
+- 自己只在 Cc 里时同样按发件人和 To 归组；同一个人的多个地址不合并；回复的父邮件不在本地时按参与人归组；
+- 邮件按时间（`mail-core` 新增的 UTC 时间戳）处理，输入顺序颠倒也能正确跟随父邮件；
+- 对话内按标准邮件线程分话题，`base_subject` 去掉 Re:/Fwd:/回复：/转发：等前缀；对话按最近往来时间倒序。
+
+12 个单元测试覆盖以上规则，其中一个用 `samples/` 的真实样例。
+
+**M2 待做**：
+
+1. **Microsoft Graph 收信**（需要你提供：在 Azure 门户注册一个“公共客户端/本机”应用，允许个人 Microsoft 账号和组织账号，开启 PKCE 回调 `http://localhost`，申请 `Mail.ReadWrite`、`Mail.Send`、`offline_access`、`User.Read` 委托权限，然后把**应用（客户端）ID** 给我；客户端 ID 不是机密，会写进源码）。拿到后实现：OAuth 登录（系统浏览器 + 本机回调 + PKCE）、令牌存 Windows 凭据管理器（`keyring`）、按文件夹增量同步（delta query）、本地 SQLite 缓存。
+2. **Gmail IMAP 收信**：用应用专用密码登录，`async-imap` 同步最近 90 天，按 `X-GM-MSGID` 去重、按 SPECIAL-USE 识别文件夹。需要一个开了两步验证的 Gmail 测试账号；本云端环境可能连不上 imap.gmail.com，需要在本地运行。
+3. **本地存储**（`mail-store`）：SQLite（sqlx）保存邮件和同步状态，tantivy 全文搜索。不依赖外部服务，可以先做。
+4. 桌面界面：左栏显示对话列表（`conversation::group` 的结果），右侧显示对话时间线。
+
 ### 下一步
 
-M1 在 Linux 上能做的部分已完成，剩下的待做事项主要需要 Windows / macOS 真机（第 1、3、5 项）或依赖后续里程碑（第 4 项）。建议：
-
-1. 有 Windows 环境时，先跑 `--selftest`、`scripts/desktop-link-test.sh` 的等价手动检查，以及中文输入法、Ctrl+Z 的手动检查（M1 待做第 1、2、3、5 项）。
-2. 同时可以开始 M2（收信与按人浏览）：先实现 Microsoft Graph 的只读收信（OAuth 登录、按文件夹增量同步、本地 SQLite 缓存），再实现 PLAN 第 2 节的对话归组规则（`conversation` crate，可先用 `samples/` 的 `.eml` 做单元测试）。
-
-M0 未完成的三项可在具备条件的环境中随时补做。
+M1 剩下的待做事项需要 Windows / macOS 真机。M2 中不依赖外部账号的部分可以先做：**M2 待做第 3 项（本地存储）和第 4 项（对话列表界面，先用 `samples/` 的邮件）**。第 1 项需要你提供 Azure 应用的客户端 ID，第 2 项需要 Gmail 测试账号和可访问 Gmail 的网络。M0 未完成的三项可在具备条件的环境中随时补做。
 
 ### 已知问题
 
@@ -96,6 +111,7 @@ M0 未完成的三项可在具备条件的环境中随时补做。
 | 目录 | 内容 |
 |---|---|
 | `crates/mail-core` | 解析邮件、去掉引用历史、按“回复所有人”规则确定收件人 |
+| `crates/conversation` | 对话归组：按直接参与人组织对话，对话内按话题分线程 |
 | `crates/ai` | 提示词、输出校验、修改对比，以及在安全限制下调用本机 CLI |
 | `crates/cli` | `letterdesk` 命令行工具 |
 | `crates/desktop` | `letterdesk-desktop` 桌面界面原型（Dioxus） |

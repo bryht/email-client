@@ -1,0 +1,13 @@
+[package]
+name = "conversation"
+description = "Letterdesk 对话归组：按直接参与人把邮件组织成对话，并在对话内按话题分线程"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+mail-core.workspace = true
+serde.workspace = true
