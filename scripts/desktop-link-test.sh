@@ -24,15 +24,33 @@ echo "\$@" >> "$WORK/opened.txt"
 SH
 chmod +x "$WORK/browser.sh"
 
-BROWSER="$WORK/browser.sh" "$BIN" --email "$WORK/link.eml" >/dev/null 2>&1 &
+BROWSER="$WORK/browser.sh" "$BIN" --email "$WORK/link.eml" >"$WORK/app.log" 2>&1 &
 PID=$!
-sleep 8
-xdotool mousemove 300 200 click 1
-sleep 3
 
-if grep -qx "https://example.com/landing?x=1" "$WORK/opened.txt" 2>/dev/null; then
-  echo "通过：链接已交给系统浏览器打开"
-else
-  echo "失败：点击链接后没有在系统浏览器中打开" >&2
+# 等窗口出现（最多 60 秒），再给页面一些时间加载。
+WID="$(timeout 60 xdotool search --sync --name '^Letterdesk$' | head -1 || true)"
+if [ -z "$WID" ]; then
+  echo "失败：60 秒内没有出现 Letterdesk 窗口" >&2
+  tail -20 "$WORK/app.log" >&2 || true
   exit 1
 fi
+sleep 5
+
+# 链接位于来信 iframe 顶部；相对窗口点击，最多重试 5 次。
+for attempt in 1 2 3 4 5; do
+  xdotool mousemove --window "$WID" 300 200 click 1
+  sleep 3
+  if grep -qx "https://example.com/landing?x=1" "$WORK/opened.txt" 2>/dev/null; then
+    echo "通过：链接已交给系统浏览器打开（第 $attempt 次点击）"
+    exit 0
+  fi
+done
+
+echo "失败：点击链接后没有在系统浏览器中打开" >&2
+xdotool getwindowgeometry "$WID" >&2 || true
+if [ -n "${ARTIFACT_DIR:-}" ] && command -v import >/dev/null; then
+  mkdir -p "$ARTIFACT_DIR"
+  import -window root "$ARTIFACT_DIR/desktop-link-test.png" || true
+  cp "$WORK/app.log" "$ARTIFACT_DIR/desktop-link-test.log" || true
+fi
+exit 1
