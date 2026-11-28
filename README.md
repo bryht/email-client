@@ -88,7 +88,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 ## 构建
 
-需要 Rust 1.85 及以上：
+需要 Rust 1.88 及以上：
 
 ```sh
 cargo build --release
