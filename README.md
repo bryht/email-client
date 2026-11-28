@@ -92,16 +92,24 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 **按人浏览界面**（`crates/desktop/src/inbox.rs`）：`--mailbox 目录` 读取目录中所有 `.eml`，`--me` 指定自己的地址。左栏按最近往来列出对话：头像（按地址固定颜色）、参与人名字、第二行显示最近一封的 Cc（PLAN 的 `Cc 名字` 样式）或主题、日期。中间是所选对话的时间线：按话题分隔，每封显示 From / To / Cc 和日期；要回复的那封（最近一封别人发来的）默认显示 HTML 原文，其余显示纯文本摘要，可点“查看原文”展开。回复建议面板和写信框针对要回复的那封邮件，换对话时重置。
 
+**模拟服务**（`crates/mock-servers`，命令 `letterdesk-mock`）：在没有真实账号时开发和测试收发信。三个服务共享同一个模拟邮箱（默认载入 `samples/`），路径和协议尽量与真实服务一致，客户端只需换基地址：
+
+- **微软登录 + Microsoft Graph**：OAuth 2.0 授权码 + PKCE（校验 `code_verifier`、只接受回环地址作为回调、刷新令牌只能用一次）；`/v1.0/me`；按文件夹的 `messages/delta`（`Prefer: odata.maxpagesize` 分页、`@odata.nextLink` / `@odata.deltaLink`、删除以 `@removed` 表示）；`/messages/{id}`、`/$value`（MIME 原文）、`PATCH isRead`、`sendMail`。测试接口：`/mock/deliver`（投递新邮件）、`/mock/delete/{id}`、`/mock/expire-tokens`。
+- **Gmail IMAP**：应用专用密码登录（`LOGIN` / `AUTHENTICATE PLAIN`）；`[Gmail]/All Mail` 等带 SPECIAL-USE 标记的文件夹；同一封邮件在收件箱和“所有邮件”中 `X-GM-MSGID` 相同；`UID SEARCH SINCE`、`UID FETCH`（含 `X-GM-LABELS`、`BODY.PEEK[]`）、`STORE \Seen`、`APPEND` 草稿、`IDLE`。
+- **Gmail SMTP**：`AUTH PLAIN` / `AUTH LOGIN`，发出的邮件和 Gmail 一样自动存入“已发送”。
+
+8 个测试走完整流程（PKCE 登录、分页增量同步、新邮件与删除、下载原文、发信、令牌过期后刷新；IMAP / SMTP 原始对话）。另用 curl 自带的 IMAP/SMTP 客户端验证过：列文件夹、按日期搜索、抓取邮件、发信后出现在“已发送”、错误密码被拒绝。模拟服务为明文连接，仅供本机开发；真实 Gmail 使用 TLS。
+
 **M2 待做**：
 
-1. **Microsoft Graph 收信**（需要你提供：在 Azure 门户注册一个“公共客户端/本机”应用，允许个人 Microsoft 账号和组织账号，开启 PKCE 回调 `http://localhost`，申请 `Mail.ReadWrite`、`Mail.Send`、`offline_access`、`User.Read` 委托权限，然后把**应用（客户端）ID** 给我；客户端 ID 不是机密，会写进源码）。拿到后实现：OAuth 登录（系统浏览器 + 本机回调 + PKCE）、令牌存 Windows 凭据管理器（`keyring`）、按文件夹增量同步（delta query）、本地 SQLite 缓存。
-2. **Gmail IMAP 收信**：用应用专用密码登录，`async-imap` 同步最近 90 天，按 `X-GM-MSGID` 去重、按 SPECIAL-USE 识别文件夹。需要一个开了两步验证的 Gmail 测试账号；本云端环境可能连不上 imap.gmail.com，需要在本地运行。
-3. **本地存储**（`mail-store`）：SQLite（sqlx）保存邮件和同步状态，tantivy 全文搜索。不依赖外部服务，可以先做。
-4. ~~桌面界面：对话列表与时间线~~ 已完成（见下）。
+1. **Outlook 收信客户端**（`mail-sync`）：系统浏览器 + 本机回调 + PKCE 登录、令牌存系统凭据管理器（`keyring`）、按文件夹增量同步、下载原文。可以先对着模拟服务开发和测试；接真实账号时需要你在 Azure 门户注册一个“公共客户端/本机”应用（允许个人 Microsoft 账号和组织账号，回调 `http://localhost`，委托权限 `Mail.ReadWrite`、`Mail.Send`、`offline_access`、`User.Read`），把**应用（客户端）ID** 给我；客户端 ID 不是机密，会写进源码。
+2. **Gmail 收信客户端**：IMAP 同步最近 90 天，按 `X-GM-MSGID` 去重、按 SPECIAL-USE 识别文件夹；SMTP 发信（不再另存“已发送”）。可以先对着模拟服务开发；接真实 Gmail 需要开了两步验证的测试账号和能访问 Gmail 的网络（真实服务需 TLS）。
+3. **本地存储**（`mail-store`）：SQLite 保存邮件和同步状态（Graph 的 deltaLink、IMAP 的 UIDVALIDITY/UID），tantivy 全文搜索。
+4. ~~桌面界面：对话列表与时间线~~ 已完成。
 
 ### 下一步
 
-M1 剩下的待做事项需要 Windows / macOS 真机。M2 中不依赖外部账号的部分可以先做：**M2 待做第 3 项（本地存储：SQLite 保存邮件与同步状态、tantivy 全文搜索，界面改为从本地库读取）**。第 1 项需要你提供 Azure 应用的客户端 ID，第 2 项需要 Gmail 测试账号和可访问 Gmail 的网络。M0 未完成的三项可在具备条件的环境中随时补做。
+对着模拟服务做 **M2 待做第 1、2 项**（Outlook 和 Gmail 的收信客户端），同步结果先写成 `.eml` 目录，桌面界面用 `--mailbox` 打开；随后做第 3 项（本地存储）。M1 剩下的待做事项需要 Windows / macOS 真机；M0 未完成的三项可在具备条件的环境中随时补做。
 
 ### 已知问题
 
@@ -117,6 +125,7 @@ M1 剩下的待做事项需要 Windows / macOS 真机。M2 中不依赖外部账
 | `crates/ai` | 提示词、输出校验、修改对比，以及在安全限制下调用本机 CLI |
 | `crates/cli` | `letterdesk` 命令行工具 |
 | `crates/desktop` | `letterdesk-desktop` 桌面界面原型（Dioxus） |
+| `crates/mock-servers` | `letterdesk-mock`：本地模拟的微软登录 + Graph 与 Gmail IMAP/SMTP |
 | `samples/` | 样例邮件（会议与报价、法语邀请、中文合同、多问题、群发确认、转发、收据、恶意指令）及分析预期 |
 
 ## 构建
@@ -184,6 +193,14 @@ cargo run -p letterdesk-desktop -- --email samples/maya-meeting.eml --backend cl
 cargo run -p letterdesk-desktop -- --selftest                     # 隔离与清洗自检，全部通过时退出码为 0
 cargo run -p letterdesk-desktop -- --email samples/maya-meeting.eml --autopilot   # 自动演示 AI 流程
 ```
+
+## 模拟服务
+
+```sh
+cargo run -p mock-servers --bin letterdesk-mock -- --mailbox samples --me lin@example.com
+```
+
+启动后会打印各服务地址、模拟的应用（客户端）ID 和 Gmail 应用专用密码。例如用 curl 试 IMAP：`curl imap://127.0.0.1:1143/INBOX -u "lin@example.com:abcd efgh ijkl mnop" -X "UID SEARCH ALL"`；投递一封新邮件：`curl --data-binary @samples/receipt.eml http://127.0.0.1:8901/mock/deliver`。
 
 ## 测试
 
