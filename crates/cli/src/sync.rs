@@ -2,6 +2,7 @@
 
 use crate::SyncAccount;
 use anyhow::{Context, Result, bail};
+use mail_sync::gmail::{GmailConfig, sync_gmail_to_dir};
 use mail_sync::maildir::sync_outlook_to_dir;
 use mail_sync::oauth::{OutlookConfig, begin_login};
 use mail_sync::outlook::OutlookClient;
@@ -55,6 +56,54 @@ pub fn run(account: SyncAccount) -> Result<()> {
                 out.display()
             );
             // 令牌目前只保存在内存中；计划存入系统凭据管理器，见 README。
+            Ok(())
+        }
+        SyncAccount::Gmail {
+            out,
+            user,
+            days,
+            all,
+            mock,
+        } => {
+            let password = match std::env::var("LETTERDESK_GMAIL_APP_PASSWORD") {
+                Ok(p) if !p.trim().is_empty() => p,
+                _ => {
+                    eprint!("请输入 {user} 的应用专用密码：");
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    line.trim().to_string()
+                }
+            };
+            let mut config = match &mock {
+                Some(spec) => {
+                    let parts: Vec<&str> = spec.split(':').collect();
+                    let [host, imap, smtp] = parts.as_slice() else {
+                        bail!("--mock 的格式是 主机:IMAP端口:SMTP端口");
+                    };
+                    GmailConfig::plain(host, imap.parse()?, smtp.parse()?, &user, &password)
+                }
+                None => GmailConfig::gmail(&user, &password),
+            };
+            config.since_days = if all { None } else { Some(days) };
+            eprintln!(
+                "正在同步 {user}（{}）……",
+                if all {
+                    "全部邮件".to_string()
+                } else {
+                    format!("最近 {days} 天")
+                }
+            );
+            let stats = sync_gmail_to_dir(&config, &out)?;
+            eprintln!(
+                "同步完成：下载 {} 封，删除 {} 封，邮件保存在 {}",
+                stats.downloaded,
+                stats.removed,
+                out.display()
+            );
+            eprintln!(
+                "查看：cargo run -p letterdesk-desktop -- --mailbox {} --me {user}",
+                out.display()
+            );
             Ok(())
         }
     }

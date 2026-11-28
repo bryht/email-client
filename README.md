@@ -109,13 +109,23 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
    - 命令：`letterdesk sync outlook --base http://127.0.0.1:8901 --client-id <ID> --out mail/`（不填 `--base` 时连接真实的微软服务；`--headless-login` 只能用于模拟服务）。之后 `letterdesk-desktop --mailbox mail/ --me <地址>` 即可浏览。
    - 测试：完整流程（浏览器登录 → 首次同步 → 无变化 → 新邮件与删除 → 令牌过期后自动刷新）和伪造回调被拒绝；另用真实命令跑通“模拟服务 → 同步 → 桌面界面”。
    - **还差**：令牌目前只在内存中，每次运行都要重新登录；需要存入系统凭据管理器（`keyring`，Linux 需要 Secret Service）。连接真实账号需要你在 Azure 门户注册一个“公共客户端/本机”应用（允许个人 Microsoft 账号和组织账号，回调 `http://localhost`，委托权限 `Mail.ReadWrite`、`Mail.Send`、`offline_access`、`User.Read`），把**应用（客户端）ID** 给我；客户端 ID 不是机密。HTTPS 目前使用 ureq 内置的 Mozilla 根证书，计划改为系统证书库（企业网络常有自定义根证书）。
-2. **Gmail 收信客户端**：IMAP 同步最近 90 天，按 `X-GM-MSGID` 去重、按 SPECIAL-USE 识别文件夹；SMTP 发信（不再另存“已发送”）。可以先对着模拟服务开发；接真实 Gmail 需要开了两步验证的测试账号和能访问 Gmail 的网络（真实服务需 TLS）。
+2. **Gmail 收信客户端**（`crates/mail-sync/src/gmail.rs`）——**已对着模拟服务完成**：
+   - IMAP：用 async-imap（Delta Chat 在 Gmail 上长期使用的库）；按 SPECIAL-USE 找收件箱、已发送和草稿，不同步“所有邮件”以免重复下载；文件以 `X-GM-MSGID` 命名，同一封邮件在多个文件夹里只存一份；按 UID 增量同步，`UIDVALIDITY` 变化时重新同步该文件夹；服务器上删除的邮件在没有其他文件夹引用时删除本地文件；默认只同步最近 90 天。状态与 Outlook 共用 `sync-state.json`。
+   - SMTP：`send_gmail` 用 lettre 发出已生成的 MIME 邮件，信封收件人可含 Bcc；不再另存“已发送”（Gmail 会自动保存）。
+   - TLS：真实 Gmail 走 993/465 端口 TLS（rustls + ring，Windows 上不需要 C 编译工具链）；明文只用于本机模拟服务。
+   - 命令：`letterdesk sync gmail --user <地址> --out mail/ [--days 90 | --all] [--mock 127.0.0.1:1143:1025]`；应用专用密码从环境变量 `LETTERDESK_GMAIL_APP_PASSWORD` 读取，没有时提示输入，不放在命令行参数里（参数在进程列表中可见）。
+   - 测试：首次同步 → 无变化 → 新邮件与删除 → SMTP 发信（含 Bcc）后下一次同步取回“已发送”；按天数限制首次同步；错误密码返回登录错误。另用真实命令跑通“模拟服务 → 同步”。
+   - **还差**：用真实 Gmail 账号验证（需要开了两步验证的测试账号和能访问 Gmail 的网络）；应用专用密码需要存入系统凭据管理器；写信框“发送”按钮还没有接到 `send_gmail` / Graph `sendMail`。
 3. **本地存储**（`mail-store`）：SQLite 保存邮件和同步状态（Graph 的 deltaLink、IMAP 的 UIDVALIDITY/UID），tantivy 全文搜索。
 4. ~~桌面界面：对话列表与时间线~~ 已完成。
 
 ### 下一步
 
-对着模拟服务做 **M2 待做第 2 项（Gmail 收信客户端：IMAP 同步 + SMTP 发信）**，同样输出到 `.eml` 目录；然后做第 3 项（本地存储），并把 Outlook 的令牌存入系统凭据管理器。M1 剩下的待做事项需要 Windows / macOS 真机；M0 未完成的三项可在具备条件的环境中随时补做。
+1. **凭据保存**：Outlook 刷新令牌和 Gmail 应用专用密码存入系统凭据管理器（`keyring` crate：Windows 凭据管理器、macOS 钥匙串、Linux Secret Service），同步时不再每次登录或输入密码。
+2. **发信接入界面**（M3 的开头）：写信框加“发送”，按 PLAN 第 1 节“默认回复所有人”生成 MIME（In-Reply-To / References、文本与 HTML 两部分），Outlook 走 Graph `sendMail`、Gmail 走 `send_gmail`；发送结果不明时的核对流程。
+3. **本地存储**（M2 待做第 3 项）：SQLite 保存邮件与同步状态，替代 `.eml` 目录 + `sync-state.json`。
+
+M1 剩下的待做事项需要 Windows / macOS 真机；M0 未完成的三项可在具备条件的环境中随时补做。
 
 ### 已知问题
 
@@ -132,7 +142,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 | `crates/cli` | `letterdesk` 命令行工具 |
 | `crates/desktop` | `letterdesk-desktop` 桌面界面原型（Dioxus） |
 | `crates/mock-servers` | `letterdesk-mock`：本地模拟的微软登录 + Graph 与 Gmail IMAP/SMTP |
-| `crates/mail-sync` | 收信同步：微软登录（PKCE）与 Graph 增量同步到 `.eml` 目录 |
+| `crates/mail-sync` | 收信同步：Outlook（微软登录 PKCE + Graph 增量同步）与 Gmail（IMAP 增量同步、SMTP 发信），同步到 `.eml` 目录 |
 | `samples/` | 样例邮件（会议与报价、法语邀请、中文合同、多问题、群发确认、转发、收据、恶意指令）及分析预期 |
 
 ## 构建
@@ -213,6 +223,10 @@ cargo run -p mock-servers --bin letterdesk-mock -- --mailbox samples --me lin@ex
 cargo run -p letterdesk-cli -- sync outlook --base http://127.0.0.1:8901 \
   --client-id 00000000-1e77-4de5-8000-000000000001 --out mail/   # 浏览器里会自动完成模拟登录
 cargo run -p letterdesk-desktop -- --mailbox mail/ --me lin@example.com
+
+# Gmail（IMAP）同样可以对着模拟服务同步：
+LETTERDESK_GMAIL_APP_PASSWORD="abcd efgh ijkl mnop" cargo run -p letterdesk-cli -- \
+  sync gmail --mock 127.0.0.1:1143:1025 --user lin@example.com --all --out gmail/
 ```
 
 例如用 curl 试 IMAP：`curl imap://127.0.0.1:1143/INBOX -u "lin@example.com:abcd efgh ijkl mnop" -X "UID SEARCH ALL"`；投递一封新邮件：`curl --data-binary @samples/receipt.eml http://127.0.0.1:8901/mock/deliver`。

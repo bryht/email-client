@@ -105,6 +105,25 @@ enum SyncAccount {
         #[arg(long)]
         headless_login: bool,
     },
+    /// Gmail（IMAP 收信，应用专用密码登录）。
+    /// 应用专用密码从环境变量 LETTERDESK_GMAIL_APP_PASSWORD 读取，没有时提示输入
+    Gmail {
+        /// 保存邮件的目录
+        #[arg(long)]
+        out: PathBuf,
+        /// Gmail 地址
+        #[arg(long)]
+        user: String,
+        /// 只同步最近多少天
+        #[arg(long, default_value_t = 90)]
+        days: u32,
+        /// 同步全部邮件（忽略 --days）
+        #[arg(long)]
+        all: bool,
+        /// 连接本机模拟服务（明文），格式 主机:IMAP端口:SMTP端口，例如 127.0.0.1:1143:1025
+        #[arg(long)]
+        mock: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]

@@ -11,9 +11,12 @@ pub const OUTLOOK_FOLDERS: [&str; 3] = ["inbox", "sentitems", "drafts"];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SyncState {
-    /// 文件夹 → deltaLink。
+    /// Outlook：文件夹 → deltaLink。
     #[serde(default)]
     pub delta_links: BTreeMap<String, String>,
+    /// Gmail（IMAP）：文件夹 → UIDVALIDITY 与已下载的 UID。
+    #[serde(default)]
+    pub imap: BTreeMap<String, crate::gmail::ImapFolderState>,
 }
 
 impl SyncState {

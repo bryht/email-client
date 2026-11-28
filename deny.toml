@@ -29,6 +29,8 @@ allow = [
     "NCSA",
     # webpki-roots（ureq 内置的 Mozilla 根证书列表，属数据许可）。
     "CDLA-Permissive-2.0",
+    # quoted_printable（lettre 的依赖）；接近公有领域的许可，与 GPL 兼容。
+    "0BSD",
 ]
 confidence-threshold = 0.9
 
