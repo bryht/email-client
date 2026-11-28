@@ -104,6 +104,12 @@ enum SyncAccount {
         /// 不打开浏览器，由本程序直接完成授权页跳转（只用于模拟服务）
         #[arg(long)]
         headless_login: bool,
+        /// 账号地址：提供时先尝试系统凭据管理器中保存的登录，免去再次在浏览器登录
+        #[arg(long)]
+        user: Option<String>,
+        /// 删除该账号（--user）保存的登录后退出
+        #[arg(long)]
+        forget: bool,
     },
     /// Gmail（IMAP 收信，应用专用密码登录）。
     /// 应用专用密码从环境变量 LETTERDESK_GMAIL_APP_PASSWORD 读取，没有时提示输入
@@ -123,6 +129,9 @@ enum SyncAccount {
         /// 连接本机模拟服务（明文），格式 主机:IMAP端口:SMTP端口，例如 127.0.0.1:1143:1025
         #[arg(long)]
         mock: Option<String>,
+        /// 删除该账号保存的应用专用密码后退出
+        #[arg(long)]
+        forget: bool,
     },
 }
 

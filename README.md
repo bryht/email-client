@@ -108,22 +108,29 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
    - `maildir.rs`：把收件箱、已发送、草稿同步到 `.eml` 目录，删除的邮件移除对应文件，deltaLink 存在目录里的 `sync-state.json`，每个文件夹完成后就保存，中断后可继续。
    - 命令：`letterdesk sync outlook --base http://127.0.0.1:8901 --client-id <ID> --out mail/`（不填 `--base` 时连接真实的微软服务；`--headless-login` 只能用于模拟服务）。之后 `letterdesk-desktop --mailbox mail/ --me <地址>` 即可浏览。
    - 测试：完整流程（浏览器登录 → 首次同步 → 无变化 → 新邮件与删除 → 令牌过期后自动刷新）和伪造回调被拒绝；另用真实命令跑通“模拟服务 → 同步 → 桌面界面”。
-   - **还差**：令牌目前只在内存中，每次运行都要重新登录；需要存入系统凭据管理器（`keyring`，Linux 需要 Secret Service）。连接真实账号需要你在 Azure 门户注册一个“公共客户端/本机”应用（允许个人 Microsoft 账号和组织账号，回调 `http://localhost`，委托权限 `Mail.ReadWrite`、`Mail.Send`、`offline_access`、`User.Read`），把**应用（客户端）ID** 给我；客户端 ID 不是机密。HTTPS 目前使用 ureq 内置的 Mozilla 根证书，计划改为系统证书库（企业网络常有自定义根证书）。
+   - **还差**：连接真实账号需要你在 Azure 门户注册一个“公共客户端/本机”应用（允许个人 Microsoft 账号和组织账号，回调 `http://localhost`，委托权限 `Mail.ReadWrite`、`Mail.Send`、`offline_access`、`User.Read`），把**应用（客户端）ID** 给我；客户端 ID 不是机密。HTTPS 目前使用 ureq 内置的 Mozilla 根证书，计划改为系统证书库（企业网络常有自定义根证书）。
 2. **Gmail 收信客户端**（`crates/mail-sync/src/gmail.rs`）——**已对着模拟服务完成**：
    - IMAP：用 async-imap（Delta Chat 在 Gmail 上长期使用的库）；按 SPECIAL-USE 找收件箱、已发送和草稿，不同步“所有邮件”以免重复下载；文件以 `X-GM-MSGID` 命名，同一封邮件在多个文件夹里只存一份；按 UID 增量同步，`UIDVALIDITY` 变化时重新同步该文件夹；服务器上删除的邮件在没有其他文件夹引用时删除本地文件；默认只同步最近 90 天。状态与 Outlook 共用 `sync-state.json`。
    - SMTP：`send_gmail` 用 lettre 发出已生成的 MIME 邮件，信封收件人可含 Bcc；不再另存“已发送”（Gmail 会自动保存）。
    - TLS：真实 Gmail 走 993/465 端口 TLS（rustls + ring，Windows 上不需要 C 编译工具链）；明文只用于本机模拟服务。
    - 命令：`letterdesk sync gmail --user <地址> --out mail/ [--days 90 | --all] [--mock 127.0.0.1:1143:1025]`；应用专用密码从环境变量 `LETTERDESK_GMAIL_APP_PASSWORD` 读取，没有时提示输入，不放在命令行参数里（参数在进程列表中可见）。
    - 测试：首次同步 → 无变化 → 新邮件与删除 → SMTP 发信（含 Bcc）后下一次同步取回“已发送”；按天数限制首次同步；错误密码返回登录错误。另用真实命令跑通“模拟服务 → 同步”。
-   - **还差**：用真实 Gmail 账号验证（需要开了两步验证的测试账号和能访问 Gmail 的网络）；应用专用密码需要存入系统凭据管理器；写信框“发送”按钮还没有接到 `send_gmail` / Graph `sendMail`。
+   - **还差**：用真实 Gmail 账号验证（需要开了两步验证的测试账号和能访问 Gmail 的网络）；写信框“发送”按钮还没有接到 `send_gmail` / Graph `sendMail`。
 3. **本地存储**（`mail-store`）：SQLite 保存邮件和同步状态（Graph 的 deltaLink、IMAP 的 UIDVALIDITY/UID），tantivy 全文搜索。
 4. ~~桌面界面：对话列表与时间线~~ 已完成。
 
+**凭据保存**（`crates/mail-sync/src/credentials.rs`）——**已完成**：Outlook 令牌和 Gmail 应用专用密码存入系统凭据管理器（`keyring` 3：Windows 凭据管理器、macOS 钥匙串、Linux Secret Service，Linux 用纯 Rust 的 zbus 实现，不需要 libdbus），条目名为 `outlook:<地址>` / `gmail:<地址>`，服务名 `Letterdesk`，不写入任何文件。
+- `letterdesk sync outlook --user <地址>` 先用保存的登录（失效则回到浏览器登录）；每次同步后保存轮换后的刷新令牌。
+- `letterdesk sync gmail`：应用专用密码按“环境变量 → 凭据管理器 → 提示输入”取得，提示输入的密码在同步成功后保存。
+- 两个命令都有 `--forget`，删除保存的凭据。
+- 凭据管理器不可用时（例如没有 D-Bus 的 Linux）给出提示，照常同步，只是不保存。
+- 已在真实的 Secret Service（gnome-keyring + D-Bus）下验证：第一次登录后保存；第二、三次不再打开浏览器、不再输入密码；`--forget` 后条目被删除。
+
 ### 下一步
 
-1. **凭据保存**：Outlook 刷新令牌和 Gmail 应用专用密码存入系统凭据管理器（`keyring` crate：Windows 凭据管理器、macOS 钥匙串、Linux Secret Service），同步时不再每次登录或输入密码。
-2. **发信接入界面**（M3 的开头）：写信框加“发送”，按 PLAN 第 1 节“默认回复所有人”生成 MIME（In-Reply-To / References、文本与 HTML 两部分），Outlook 走 Graph `sendMail`、Gmail 走 `send_gmail`；发送结果不明时的核对流程。
-3. **本地存储**（M2 待做第 3 项）：SQLite 保存邮件与同步状态，替代 `.eml` 目录 + `sync-state.json`。
+1. **发信接入界面**（M3 的开头）：写信框加“发送”，按 PLAN 第 1 节“默认回复所有人”生成 MIME（In-Reply-To / References、文本与 HTML 两部分），Outlook 走 Graph `sendMail`、Gmail 走 `send_gmail`；发送前用 `Message-ID` 记录，发送结果不明时到“已发送”核对（PLAN 第 1 节“发送中断”）。
+2. **本地存储**（M2 待做第 3 项）：SQLite 保存邮件与同步状态，替代 `.eml` 目录 + `sync-state.json`。
+3. **界面接入同步**：桌面界面里添加账号、后台同步、新邮件出现在对话列表。
 
 M1 剩下的待做事项需要 Windows / macOS 真机；M0 未完成的三项可在具备条件的环境中随时补做。
 
