@@ -260,9 +260,10 @@ fn run_isolated(inv: &Invocation, timeout: Duration, tool: &str) -> Result<Strin
         .prefix("letterdesk-ai-")
         .tempdir()?;
     let program = resolve_program(&inv.program);
+    let args = batch_safe_args(&program, &inv.args);
 
     let mut child = Command::new(&program)
-        .args(&inv.args)
+        .args(&args)
         .current_dir(workdir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -331,6 +332,30 @@ fn tail(s: &str) -> String {
 }
 
 /// 在 Windows 上，npm 安装的命令是 `.cmd` 文件，需要显式查找。
+/// npm 在 Windows 上安装的命令是 `.cmd` 批处理文件（内容类似 `node cli.js %*`）。
+/// cmd.exe 无法可靠传递含换行的参数，Rust 也会拒绝执行，
+/// 因此目标是批处理文件时把参数里的换行换成空格。只有系统提示含换行，压平后含义不变。
+fn batch_safe_args(program: &std::path::Path, args: &[OsString]) -> Vec<OsString> {
+    let is_batch = program
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    if !is_batch {
+        return args.to_vec();
+    }
+    args.iter()
+        .map(|a| match a.to_str() {
+            Some(s) if s.contains(['\n', '\r']) => s
+                .split(['\n', '\r'])
+                .filter(|l| !l.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into(),
+            _ => a.clone(),
+        })
+        .collect()
+}
+
 #[cfg(windows)]
 fn resolve_program(program: &std::ffi::OsStr) -> PathBuf {
     let p = PathBuf::from(program);
@@ -439,6 +464,18 @@ mod tests {
             backend.parse_output(err),
             Err(AiError::Failed { .. })
         ));
+    }
+
+    #[test]
+    fn batch_files_get_single_line_args() {
+        let args: Vec<OsString> = vec![
+            "--system-prompt".into(),
+            "line one\nline two\r\n- three".into(),
+        ];
+        let flat = batch_safe_args(std::path::Path::new("C:/npm/claude.CMD"), &args);
+        assert_eq!(flat[1], OsString::from("line one line two - three"));
+        let same = batch_safe_args(std::path::Path::new("/usr/bin/claude"), &args);
+        assert_eq!(same, args);
     }
 
     #[test]
