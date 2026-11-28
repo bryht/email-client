@@ -52,7 +52,7 @@ Letterdesk 面向日常处理英文邮件的人。打开应用，用户可以按
 
 **上架条件。** Gmail 和 Outlook 均通过 Windows 版的登录、收信、草稿保存与恢复、发信验收后，Letterdesk 1.0 才在微软商店公开销售。两种邮箱随同一版本开放。
 
-**交付验收。** 分别用 Gmail 和 Outlook 账号验证：用户能在 Windows 上完成安装、激活和邮箱登录，并给 Maya 回信。对方用 Gmail 或 Outlook 打开回信时，能在原邮件线程看到正确的收件人、抄送人和正文。用户中途退出时，可以回来接着写草稿。
+**交付验收。** 分别用 Gmail 和 Outlook 账号验证：用户能在 Windows 上完成安装、激活和邮箱登录，并给 Maya 回信。对方用 Gmail 或 Outlook 打开回信时，能在原邮件线程看到正确的收件人、抄送人和正文。用户中途退出时，可以回来接着写草稿。Windows 界面验收覆盖含表格和图片的 HTML 来信，以及从对话内展开草稿后继续编辑并保留富文本格式。
 
 产品规划还包括语气调整、英文润色及修改说明、带变量的场景模板、从已发邮件学习写作风格、多账号，以及提取待办、截止日期、行程、账单和附件提醒。这些能力的首发优先级待定。日历集成可将日程写入 Google Calendar、Outlook Calendar 或导出 `.ics`，原计划放在后续版本。
 
@@ -66,12 +66,6 @@ Letterdesk 面向日常处理英文邮件的人。打开应用，用户可以按
 
 **AI 用量。** Letterdesk 仅销售客户端软件。使用云模型时，客户端以用户自己的 API 密钥直连所选服务商，AI 额度和用量费用均由用户与服务商直接结算。用户也可以通过 Ollama 在本机运行模型。
 
-## 5. 待决定的事
-
-| 决策 | 需要明确的问题 |
-|---|---|
-| 桌面框架 | 用真实 HTML 来信和富文本编辑验证 Dioxus，再决定采用它还是 Tauri + Leptos。 |
-
 ## 附录 · 实现参考与概念图
 
 <details>
@@ -79,7 +73,7 @@ Letterdesk 面向日常处理英文邮件的人。打开应用，用户可以按
 
 | 模块 | 设计与候选依赖 |
 |---|---|
-| 桌面与领域模型 | 尽量采用 Rust Cargo workspace。`app` 首选 Dioxus 的系统 WebView，备选 Tauri + Leptos。`mail-core` 定义 Account、Conversation（按人展示的往来）、Thread（标准邮件线程）、Message 和 Draft。 |
+| 桌面与领域模型 | 尽量采用 Rust Cargo workspace。Windows 桌面界面使用 Dioxus Desktop，通过系统 WebView 显示 HTML 邮件和富文本写信框。`mail-core` 定义 Account、Conversation（按人展示的往来）、Thread（标准邮件线程）、Message 和 Draft。 |
 | 收发与存储 | `mail-sync` 用 tokio、async-imap 做增量同步与 IDLE 推送，mail-parser 解析邮件。`mail-send` 用 lettre 发信。`mail-store` 用 SQLite / sqlx 缓存，tantivy 做全文搜索。 |
 | 身份与归组 | `conversation` 依据 In-Reply-To / References 关联父邮件，结合主题和正文标记识别转发。处理别名、多地址与服务商的地址规则。同步时保留原始信头，发信时写入正确的线程引用。引用、签名剥离优先用规则，必要时借助 AI。 |
 | 模型与扩展 | `ai` 通过统一流式接口适配 Anthropic、OpenAI 兼容服务和 Ollama（本地或云端），以 reqwest / SSE 等方式接收结果。任务包括分拣、提取问题、起草、扩写意图、改写、翻译和结构化提取。`extract` 可使用 JSON Schema，`templates` 可用 minijinja。 |
