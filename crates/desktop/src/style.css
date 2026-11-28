@@ -14,13 +14,13 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .rail { background: var(--panel); border-right: 1px solid var(--line); padding: 12px 8px; display: flex; flex-direction: column; gap: 6px; }
 .rail-item { padding: 10px 4px; border-radius: 8px; text-align: center; color: var(--muted); font-size: 12px; }
 .rail-item.active { background: var(--accent); color: #fff; }
-.reader { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
+.reader { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border-right: 1px solid var(--line); }
 .mail-header { background: var(--panel); padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .mail-header h1 { margin: 0 0 8px; font-size: 20px; }
 .meta { color: var(--muted); margin: 2px 0; }
 .meta b { color: var(--text); font-weight: 600; }
 .remote-toggle { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }
-.email-frame { flex: 1; width: 100%; border: 0; background: #fff; }
+.email-frame { flex: 1; min-height: 140px; width: 100%; border: 0; background: #fff; }
 .email-frame.raw { flex: 0 0 120px; border-top: 4px dashed #c33; }
 .compose { display: flex; flex-direction: column; min-width: 0; padding: 16px 20px; gap: 10px; }
 .compose h2 { margin: 0; font-size: 16px; }
@@ -36,3 +36,27 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .editor p { margin: 0 0 10px; }
 .plain summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .plain pre { white-space: pre-wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 180px; overflow: auto; font-size: 12px; }
+.ai-panel { flex: 0 0 auto; max-height: 55vh; overflow: auto; background: var(--panel); border-top: 1px solid var(--line); padding: 12px 20px; display: flex; flex-direction: column; gap: 8px; }
+.ai-head { display: flex; align-items: center; gap: 8px; }
+.ai-title { font-weight: 600; }
+.ai-conn { color: var(--muted); font-size: 12px; }
+.ai-note { color: var(--muted); font-size: 12px; }
+.ai-error { color: #a33; font-size: 13px; }
+.ai-summary { background: var(--accent-soft); border-radius: 8px; padding: 8px 10px; }
+.question { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.question .ask { font-weight: 600; }
+.question .quote { color: var(--muted); font-size: 12px; font-style: italic; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 4px 12px; cursor: pointer; }
+.chip:hover { border-color: var(--accent); }
+.chip.selected { background: var(--accent); border-color: var(--accent); color: #fff; }
+.custom { height: 30px; border: 1px solid var(--line); border-radius: 6px; padding: 0 8px; flex: 1; min-width: 0; }
+.ai-actions { display: flex; gap: 8px; align-items: center; }
+.ai-actions select { height: 30px; border: 1px solid var(--line); border-radius: 6px; }
+.ghost { height: 30px; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 0 12px; cursor: pointer; }
+.primary:disabled, .ghost:disabled { opacity: .6; cursor: default; }
+.revision { border: 1px solid var(--accent); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.diff { white-space: pre-wrap; line-height: 1.55; }
+.diff del { background: #fbe3e3; color: #8a1f1f; }
+.diff ins { background: #dff3e4; color: #1f5b3f; text-decoration: none; }
+.question .custom { flex: none; }

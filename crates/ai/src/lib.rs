@@ -128,11 +128,11 @@ impl<B: Backend> Assistant<B> {
     ) -> Result<Value, AiError> {
         let mut last_len = 0;
         self.backend.complete_streaming(prompt, &mut |raw| {
-            if let Some(body) = partial_string_field(raw, "body") {
-                if body.len() != last_len {
-                    last_len = body.len();
-                    on_body(&body);
-                }
+            if let Some(body) = partial_string_field(raw, "body")
+                && body.len() != last_len
+            {
+                last_len = body.len();
+                on_body(&body);
             }
         })
     }

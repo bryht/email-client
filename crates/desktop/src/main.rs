@@ -6,12 +6,16 @@
 //!
 //! 用法：
 //!   letterdesk-desktop [--email 来信.eml] [--draft 草稿.txt]
+//!                      [--backend claude|ollama|codex] [--model 模型] [--login api-key|subscription]
 //!   letterdesk-desktop --selftest     # 加载恶意样例并自动检查，输出 JSON 结果后退出
 
+mod ai_panel;
 mod composer;
 mod html;
 mod selftest;
 
+use ai::cli::{CliKind, Login};
+use ai_panel::{AiPanel, AiSettings};
 use composer::Composer;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
@@ -20,12 +24,16 @@ use std::sync::OnceLock;
 
 const STYLE: &str = include_str!("style.css");
 const DEFAULT_EMAIL: &[u8] = include_bytes!("../../../samples/html-newsletter.eml");
-const DEFAULT_DRAFT: &str = "Hi Maya,\n\nThanks for the update. Thursday at 3 pm works for me.\n\nOn the discount, the most we can offer for the pilot is 5%.\n\nBest regards,";
+const USAGE: &str = "用法：letterdesk-desktop [--email 来信.eml] [--draft 草稿.txt] \
+[--backend claude|ollama|codex] [--model 模型] [--login api-key|subscription] [--allow-unverified] \
+[--my-name 名字] [--autopilot] [--selftest]";
 
 #[derive(Debug, Clone)]
 struct Args {
     email: Email,
-    draft: String,
+    /// 启动时放进写信框的草稿（纯文本）。
+    draft: Option<String>,
+    ai: AiSettings,
     selftest: bool,
 }
 
@@ -35,19 +43,49 @@ fn parse_args() -> Result<Args, String> {
     let mut email_path = None;
     let mut draft_path = None;
     let mut selftest = false;
+    let mut ai = AiSettings {
+        kind: CliKind::ClaudeCode,
+        model: None,
+        login: Login::Subscription,
+        allow_unverified: false,
+        ui_lang: "zh-CN".into(),
+        my_name: None,
+        autopilot: false,
+    };
     let mut it = std::env::args().skip(1);
+    let value = |it: &mut std::iter::Skip<std::env::Args>, flag: &str| {
+        it.next().ok_or_else(|| format!("{flag} 需要一个值"))
+    };
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--email" => email_path = Some(it.next().ok_or("--email 需要文件路径")?),
-            "--draft" => draft_path = Some(it.next().ok_or("--draft 需要文件路径")?),
+            "--email" => email_path = Some(value(&mut it, "--email")?),
+            "--draft" => draft_path = Some(value(&mut it, "--draft")?),
+            "--backend" => {
+                ai.kind = match value(&mut it, "--backend")?.as_str() {
+                    "claude" => CliKind::ClaudeCode,
+                    "ollama" => CliKind::Ollama,
+                    "codex" => CliKind::Codex,
+                    other => return Err(format!("不支持的 --backend：{other}")),
+                }
+            }
+            "--model" => ai.model = Some(value(&mut it, "--model")?),
+            "--login" => {
+                ai.login = match value(&mut it, "--login")?.as_str() {
+                    "api-key" => Login::ApiKey,
+                    "subscription" => Login::Subscription,
+                    other => return Err(format!("不支持的 --login：{other}")),
+                }
+            }
+            "--allow-unverified" => ai.allow_unverified = true,
+            "--ui-lang" => ai.ui_lang = value(&mut it, "--ui-lang")?,
+            "--my-name" => ai.my_name = Some(value(&mut it, "--my-name")?),
+            "--autopilot" => ai.autopilot = true,
             "--selftest" => selftest = true,
             "-h" | "--help" => {
-                println!(
-                    "用法：letterdesk-desktop [--email 来信.eml] [--draft 草稿.txt] [--selftest]"
-                );
+                println!("{USAGE}");
                 std::process::exit(0);
             }
-            other => return Err(format!("未知参数：{other}")),
+            other => return Err(format!("未知参数：{other}\n{USAGE}")),
         }
     }
     let raw = if selftest {
@@ -60,12 +98,13 @@ fn parse_args() -> Result<Args, String> {
     };
     let email = Email::parse(&raw).map_err(|e| format!("无法解析来信：{e}"))?;
     let draft = match draft_path {
-        Some(p) => std::fs::read_to_string(&p).map_err(|e| format!("无法读取 {p}：{e}"))?,
-        None => DEFAULT_DRAFT.to_string(),
+        Some(p) => Some(std::fs::read_to_string(&p).map_err(|e| format!("无法读取 {p}：{e}"))?),
+        None => None,
     };
     Ok(Args {
         email,
         draft,
+        ai,
         selftest,
     })
 }
@@ -102,6 +141,8 @@ fn App() -> Element {
     let email = args.email.clone();
     let mut remote_images = use_signal(|| true);
     let srcdoc = html::email_srcdoc(&email.html, remote_images());
+    // 写信框内容（清洗后的 HTML），写信框与回复建议面板共用。
+    let content = use_signal(String::new);
 
     if args.selftest {
         use_future(|| async { selftest::run().await });
@@ -166,10 +207,13 @@ fn App() -> Element {
                         srcdoc: "<script>parent.postMessage('control-ran','*')</script>",
                     }
                 }
+                if !args.selftest {
+                    AiPanel { email: email.clone(), settings: args.ai.clone(), content }
+                }
             }
             section { class: "compose",
                 h2 { "回复 {email.from.display_name()}" }
-                Composer { draft: args.draft.clone() }
+                Composer { content, initial: args.draft.clone() }
             }
         }
     }

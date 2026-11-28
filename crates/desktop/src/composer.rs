@@ -77,15 +77,24 @@ fn apply_format(format: Format, value: Option<&str>) {
 
 #[derive(Props, Clone, PartialEq)]
 pub struct ComposerProps {
-    /// 填入编辑区的 AI 草稿（纯文本）。
-    pub draft: String,
+    /// Rust 一侧保存的内容：始终是清洗后的 HTML。与回复建议面板共用。
+    pub content: Signal<String>,
+    /// 启动时放进编辑区的草稿（纯文本）。
+    pub initial: Option<String>,
 }
 
 #[component]
 pub fn Composer(props: ComposerProps) -> Element {
-    // Rust 一侧保存的内容：始终是清洗后的 HTML。
-    let mut content = use_signal(String::new);
+    let mut content = props.content;
     let mut link_url = use_signal(|| String::from("https://"));
+    let initial = props.initial.clone();
+    use_effect(move || {
+        if let Some(text) = &initial {
+            let html = text_to_html(text);
+            write_editor_html(&html);
+            content.set(html);
+        }
+    });
 
     let sync = move || {
         spawn(async move {
@@ -93,13 +102,6 @@ pub fn Composer(props: ComposerProps) -> Element {
                 content.set(clean_composer_html(&raw));
             }
         });
-    };
-
-    let draft = props.draft.clone();
-    let fill_draft = move |_| {
-        let html = text_to_html(&draft);
-        write_editor_html(&html);
-        content.set(html);
     };
 
     let format_button = move |label: &'static str, title: &'static str, format: Format| {
@@ -147,8 +149,6 @@ pub fn Composer(props: ComposerProps) -> Element {
                     },
                     "链接"
                 }
-                span { class: "spacer" }
-                button { class: "primary", onclick: fill_draft, "填入 AI 草稿" }
             }
             div {
                 id: EDITOR_ID,

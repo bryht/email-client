@@ -2405,8 +2405,11 @@ dependencies = [
 name = "letterdesk-desktop"
 version = "0.1.0"
 dependencies = [
+ "ai",
  "ammonia",
  "dioxus",
+ "futures-channel",
+ "futures-util",
  "mail-core",
  "serde_json",
 ]

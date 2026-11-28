@@ -19,17 +19,16 @@ pub(crate) fn extract_json(text: &str) -> Result<Value, AiError> {
         .or_else(|| trimmed.strip_prefix("```"))
         .and_then(|s| s.strip_suffix("```"))
         .map(str::trim);
-    if let Some(inner) = unfenced {
-        if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(inner) {
-            return Ok(v);
-        }
+    if let Some(inner) = unfenced
+        && let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(inner)
+    {
+        return Ok(v);
     }
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
-        if start < end {
-            if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(&trimmed[start..=end]) {
-                return Ok(v);
-            }
-        }
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
+        && start < end
+        && let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(&trimmed[start..=end])
+    {
+        return Ok(v);
     }
     Err(AiError::InvalidOutput("输出中没有 JSON 对象".into()))
 }

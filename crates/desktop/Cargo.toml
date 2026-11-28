@@ -17,3 +17,6 @@ mail-core.workspace = true
 dioxus = { version = "0.7", features = ["desktop"] }
 ammonia = "4"
 serde_json.workspace = true
+ai.workspace = true
+futures-channel = "0.3"
+futures-util = "0.3"

@@ -52,7 +52,9 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 ### M1 进展
 
-`crates/desktop`（`letterdesk-desktop`）是界面原型：左侧导航（Mail / People / Calendar）、中间阅读区、右侧写信框。当前只读一封 `.eml`（默认 `samples/html-newsletter.eml`），还没有接入 AI 和邮箱。
+`crates/desktop`（`letterdesk-desktop`）是界面原型：左侧导航（Mail / People / Calendar）、中间阅读区和“回复建议”面板、右侧写信框。当前只读一封 `.eml`（默认 `samples/html-newsletter.eml`），还没有接入邮箱。
+
+**AI 已接入界面**（`ai_panel.rs`）：点“分析这封邮件”后显示摘要、问题、原句和选项按钮（含“稍后答复”和自写意图输入框），可填补充说明、选语气；“生成草稿”把正文边生成边写进写信框，并提供回译；已有草稿时按钮变为“按新选择改写”，以写信框当前内容（含手改）为基础整篇改写，显示修改对比，由用户“采用”或“放弃”。模型调用在后台线程执行，经通道回到界面。`--autopilot` 会自动走一遍“分析 → 每题选第一个选项 → 生成 → 改选第一个问题 → 改写”，并把结果以 `AUTOPILOT {json}` 打印到标准输出，便于在无界面环境中检查。已用本机 Claude Code 实测：改选会议决定后，修改对比只涉及会议相关的句子，折扣段落保持不变。
 
 **已验证的两项高风险设计**（`letterdesk-desktop --selftest` 自动检查，Linux CI 中在 Xvfb 下运行）：
 
@@ -61,15 +63,16 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 **M1 待做**：
 
-1. 把 `ai` 接进界面：来信下显示问题与选项，点选后流式生成草稿到写信框，改选项时显示修改对比（用 `DiffSpan` 渲染）。
-2. 来信中的链接：现在 sandbox 会拦截点击；需要改为在系统浏览器中打开（例如由 Rust 在清洗时给链接加标记，点击由应用接管）。
+1. 来信中的链接：现在 sandbox 会拦截点击；需要改为在系统浏览器中打开（例如由 Rust 在清洗时给链接加标记，点击由应用接管）。
+2. 采用改写结果时目前按纯文本写回，会丢掉写信框里的粗体、列表等格式；需要在改写时保留格式（例如按段落比对，只替换改动的段落）。
 3. 输入法与粘贴的真机验证（Windows WebView2）：中文输入法组字时不能被读回和写回打断；`execCommand` 在 WebView2 上的行为。
 4. 键盘快捷键（Ctrl+B 等）、撤销/重做在写回后的表现。
-5. Windows 和 macOS 上运行 `--selftest`（目前只在 Linux CI 上跑）。
+5. 首次使用 AI 时询问是否开启自动分析（PLAN 第 1 节）；目前只有手动“分析这封邮件”。
+6. Windows 和 macOS 上运行 `--selftest`（目前只在 Linux CI 上跑）。
 
 ### 下一步
 
-继续 M1：先做“M1 待做”第 1 项，把 AI 选项和流式草稿接进界面，再处理链接打开。M0 未完成的三项可在具备条件的环境中随时补做。
+继续 M1：先做“M1 待做”第 1、2 项（链接在系统浏览器中打开；采用改写时保留格式），再做第 5 项。界面原型稳定后进入 M2（收信与按人浏览）。M0 未完成的三项可在具备条件的环境中随时补做。
 
 ### 已知问题
 
@@ -146,8 +149,9 @@ Linux 需要先安装 WebKitGTK：`sudo apt-get install libwebkit2gtk-4.1-dev li
 
 ```sh
 cargo run -p letterdesk-desktop                                   # 默认打开 samples/html-newsletter.eml
-cargo run -p letterdesk-desktop -- --email samples/maya-meeting.eml --draft reply.txt
+cargo run -p letterdesk-desktop -- --email samples/maya-meeting.eml --backend claude --my-name Lin
 cargo run -p letterdesk-desktop -- --selftest                     # 隔离与清洗自检，全部通过时退出码为 0
+cargo run -p letterdesk-desktop -- --email samples/maya-meeting.eml --autopilot   # 自动演示 AI 流程
 ```
 
 ## 测试

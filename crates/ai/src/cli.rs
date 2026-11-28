@@ -119,13 +119,13 @@ pub struct CliBackend {
 
 impl CliBackend {
     pub fn new(config: CliConfig) -> Result<Self, AiError> {
-        if let Safety::Unverified(reason) = config.kind.safety() {
-            if !config.allow_unverified {
-                return Err(AiError::Unsafe {
-                    tool: config.kind.display_name().into(),
-                    reason: reason.into(),
-                });
-            }
+        if let Safety::Unverified(reason) = config.kind.safety()
+            && !config.allow_unverified
+        {
+            return Err(AiError::Unsafe {
+                tool: config.kind.display_name().into(),
+                reason: reason.into(),
+            });
         }
         if config.kind == CliKind::Ollama && config.model.is_none() {
             return Err(AiError::Config(
