@@ -21,3 +21,5 @@ ai.workspace = true
 futures-channel = "0.3"
 futures-util = "0.3"
 similar.workspace = true
+dirs = "7"
+serde.workspace = true

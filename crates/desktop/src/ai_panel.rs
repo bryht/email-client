@@ -5,6 +5,7 @@
 
 use crate::composer::{EDITOR_ID, js_string, write_editor_html};
 use crate::html::{clean_composer_html, html_to_text, merge_formatting, text_to_html};
+use crate::settings::Settings;
 use ai::cli::{CliBackend, CliConfig, CliKind, Login};
 use ai::{
     AiError, Analysis, Answer, Assistant, Decision, DiffSpan, Draft, DraftBasis, DraftRequest,
@@ -29,6 +30,29 @@ pub struct AiSettings {
 }
 
 impl AiSettings {
+    /// 设置文件中区分连接的标识，例如 `claude`、`ollama:qwen3`。
+    pub fn connection_key(&self) -> String {
+        match &self.model {
+            Some(m) => format!("{}:{m}", self.kind.default_program()),
+            None => self.kind.default_program().to_string(),
+        }
+    }
+
+    /// 来信内容是否会离开这台电脑。Ollama 的云端模型名以 `-cloud` 或 `:cloud` 结尾。
+    pub fn is_cloud(&self) -> bool {
+        match self.kind {
+            CliKind::Ollama => self
+                .model
+                .as_deref()
+                .is_some_and(|m| m.ends_with("-cloud") || m.ends_with(":cloud")),
+            CliKind::ClaudeCode | CliKind::Codex => true,
+        }
+    }
+
+    fn uses_subscription(&self) -> bool {
+        self.login == Login::Subscription && self.kind != CliKind::Ollama
+    }
+
     fn assistant(&self) -> Result<Assistant<CliBackend>, AiError> {
         let mut config = CliConfig::new(self.kind);
         config.model = self.model.clone();
@@ -114,6 +138,13 @@ pub fn AiPanel(props: AiPanelProps) -> Element {
     let mut basis = use_signal(|| None::<DraftBasis>);
     let mut back_translation = use_signal(|| None::<String>);
     let mut pending = use_signal(|| None::<(Revision, DraftBasis)>);
+    // 自动分析：None 表示还没问过用户。
+    let mut auto = use_signal(|| {
+        Settings::load()
+            .auto_analyze
+            .get(&props.settings.connection_key())
+            .copied()
+    });
 
     let mut analyze = move || {
         phase.set(Phase::Analyzing);
@@ -227,6 +258,27 @@ pub fn AiPanel(props: AiPanelProps) -> Element {
         basis.set(Some(new_basis));
     };
 
+    let mut set_auto = move |on: bool| {
+        auto.set(Some(on));
+        let mut stored = Settings::load();
+        stored
+            .auto_analyze
+            .insert(settings.read().connection_key(), on);
+        if let Err(e) = stored.save() {
+            error.set(Some(format!("无法保存设置：{e}")));
+        }
+        if on && phase() == Phase::Idle {
+            analyze();
+        }
+    };
+
+    // 已开启自动分析时，打开邮件就开始分析。
+    use_hook(move || {
+        if auto() == Some(true) && !settings.read().autopilot {
+            analyze();
+        }
+    });
+
     // 自动演示（--autopilot）：分析 → 每题选第一个选项 → 生成草稿 → 模拟手改（第一段加粗）
     // → 改选第一个问题 → 改写 → 采用，并把结果以 JSON 打印到标准输出，便于在无界面环境中检查。
     if props.settings.autopilot {
@@ -292,8 +344,10 @@ pub fn AiPanel(props: AiPanelProps) -> Element {
         });
     }
 
-    let subscription_notice =
-        props.settings.login == Login::Subscription && props.settings.kind != CliKind::Ollama;
+    let subscription_notice = props.settings.uses_subscription();
+    let cloud = props.settings.is_cloud();
+    // 订阅套餐登录的云端连接默认建议不开启。
+    let recommend_on = !(cloud && subscription_notice);
     let has_draft = basis.read().is_some();
 
     rsx! {
@@ -302,6 +356,16 @@ pub fn AiPanel(props: AiPanelProps) -> Element {
                 span { class: "ai-title", "回复建议" }
                 span { class: "ai-conn", "{conn_label(&props.settings)}" }
                 span { class: "spacer" }
+                if let Some(on) = auto() {
+                    label { class: "ai-note",
+                        input {
+                            r#type: "checkbox",
+                            checked: on,
+                            onchange: move |e| set_auto(e.checked()),
+                        }
+                        " 自动分析"
+                    }
+                }
                 button {
                     class: "ghost",
                     disabled: phase() == Phase::Analyzing,
@@ -312,8 +376,37 @@ pub fn AiPanel(props: AiPanelProps) -> Element {
             if subscription_notice {
                 div { class: "ai-note", "该连接按订阅套餐登录处理，使用受服务商条款约束；Letterdesk 不读取任何登录凭据。" }
             }
+            if auto().is_none() && !props.settings.autopilot {
+                div { class: "consent",
+                    div { class: "ai-title", "要自动分析新来信吗？" }
+                    div {
+                        if cloud {
+                            "开启后，打开邮件时会自动把来信内容发给 {conn_label(&props.settings)}（云端服务）分析，准备回复选项。"
+                        } else {
+                            "开启后，打开邮件时会自动用本机模型分析来信，内容不离开这台电脑。"
+                        }
+                    }
+                    if subscription_notice {
+                        div { class: "ai-note", "这个连接按订阅套餐登录：自动分析每封来信可能超出“个人正常使用”的范围，建议先不开启，需要时手动分析。" }
+                    }
+                    div { class: "ai-actions",
+                        button {
+                            class: if recommend_on { "primary" } else { "ghost" },
+                            onclick: move |_| set_auto(true),
+                            "开启自动分析"
+                        }
+                        button {
+                            class: if recommend_on { "ghost" } else { "primary" },
+                            onclick: move |_| set_auto(false),
+                            "暂不开启"
+                        }
+                        span { class: "ai-note", "之后可以随时在这里更改。" }
+                    }
+                }
+            }
             match phase() {
-                Phase::Idle => rsx! { div { class: "ai-note", "点“分析这封邮件”，找出需要你决定的问题。" } },
+                Phase::Idle if auto().is_some() => rsx! { div { class: "ai-note", "点“分析这封邮件”，找出需要你决定的问题。" } },
+                Phase::Idle => rsx! {},
                 Phase::Analyzing => rsx! { div { class: "ai-note", "正在分析…" } },
                 Phase::Failed(e) => rsx! { div { class: "ai-error", "分析失败：{e}" } },
                 Phase::Ready => rsx! {},

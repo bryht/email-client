@@ -13,6 +13,7 @@ mod ai_panel;
 mod composer;
 mod html;
 mod selftest;
+mod settings;
 
 use ai::cli::{CliKind, Login};
 use ai_panel::{AiPanel, AiSettings};

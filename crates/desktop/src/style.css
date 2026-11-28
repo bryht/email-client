@@ -60,3 +60,4 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .diff del { background: #fbe3e3; color: #8a1f1f; }
 .diff ins { background: #dff3e4; color: #1f5b3f; text-decoration: none; }
 .question .custom { flex: none; }
+.consent { border: 1px solid var(--accent); background: var(--accent-soft); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
