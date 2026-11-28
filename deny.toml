@@ -6,6 +6,11 @@ all-features = true
 
 [advisories]
 version = 2
+# 安全漏洞对所有依赖都报错。“已停止维护”和“不健全”只检查我们直接依赖的 crate：
+# Dioxus Desktop 在 Linux 上经 wry/tao 依赖 GTK3 绑定（gtk-rs 已停止维护 GTK3 版本），
+# 这类间接依赖我们无法替换，由上游迁移后再收紧。
+unmaintained = "workspace"
+unsound = "workspace"
 
 [licenses]
 version = 2

@@ -1,0 +1,37 @@
+From: Maya Patel <maya@example.com>
+To: Lin Chen <lin@example.com>
+Cc: Alex Carter <alex@example.com>
+Subject: Pilot rollout plan (HTML)
+Date: Fri, 13 Mar 2026 09:00:00 +0000
+Message-ID: <maya-html-1@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+Hi Lin,
+
+Here is the rollout plan for the pilot. Would Thursday at 3 pm work for a review call?
+
+Week 1: Setup - Alex
+Week 2: Training - Maya
+
+Thanks,
+Maya
+--b1
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>.hl{background:#fff3c4;padding:2px 4px}</style></head><body>
+<p>Hi Lin,</p>
+<p>Here is the rollout plan for the pilot. <span class="hl">Would Thursday at 3 pm work for a review call?</span></p>
+<table cellpadding="6" border="1" style="border-collapse:collapse">
+<tr bgcolor="#eef3ef"><th>Week</th><th>Task</th><th>Owner</th></tr>
+<tr><td>1</td><td>Setup</td><td>Alex</td></tr>
+<tr><td>2</td><td>Training</td><td>Maya</td></tr>
+</table>
+<p><img src="https://images.example.com/chart.png" alt="Rollout chart" width="320"></p>
+<p>Details: <a href="https://example.com/pilot">pilot page</a></p>
+<p>Thanks,<br>Maya</p>
+</body></html>
+--b1--

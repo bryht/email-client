@@ -20,7 +20,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 | # | 里程碑 | 状态 |
 |---|---|---|
 | M0 | AI 命令行原型 | 完成；Ollama、Codex、Windows 真机实测待具备条件的环境补做 |
-| M1 | Dioxus 界面原型：Rust 自研富文本编辑器、HTML 邮件隔离 | 未开始 |
+| M1 | Dioxus 界面原型：Rust 自研富文本编辑器、HTML 邮件隔离 | 进行中：两项高风险验证已通过，见“M1 进展” |
 | M2 | 收信与按人浏览（Outlook / Graph、Gmail / IMAP） | 未开始 |
 | M3 | 发信与草稿同步 | 未开始 |
 | M4 | 多账号、Outlook 日历（只读）、签名、通知与托盘 | 未开始 |
@@ -50,9 +50,26 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 2. **Codex**：需要 OpenAI 账号登录。确认能否完全关闭命令执行工具并限制文件读取；能做到就把 `CliKind::Codex.safety()` 改为 `Enforced` 并补测试，做不到就保持默认拒绝。同时补充 PLAN 第 4 节的 Codex 条款说明（需要读 OpenAI 的官方说明）。
 3. **Windows 真机**：CI 已用假 `.cmd` 验证参数传递；仍建议在 Windows 上用真实的 npm 版 `claude` 跑一次 `live_cli`。
 
+### M1 进展
+
+`crates/desktop`（`letterdesk-desktop`）是界面原型：左侧导航（Mail / People / Calendar）、中间阅读区、右侧写信框。当前只读一封 `.eml`（默认 `samples/html-newsletter.eml`），还没有接入 AI 和邮箱。
+
+**已验证的两项高风险设计**（`letterdesk-desktop --selftest` 自动检查，Linux CI 中在 Xvfb 下运行）：
+
+1. **HTML 来信隔离**（`html.rs`）：ammonia 清洗（保留表格、内联样式和 `<style>`，去掉脚本、事件属性、表单、嵌入框架、`javascript:` 与 `data:` 链接）→ 包装成独立文档并注入 CSP（`default-src 'none'`，图片来源按“自动加载外部图片”开关切换）→ 放进空 `sandbox` 的 iframe。自检用一封恶意来信同时渲染“清洗后”和“未清洗、只靠 CSP + sandbox”两个 iframe，再加一个允许脚本的对照 iframe：只收到对照组的消息，来信中的脚本和事件处理一个都没有运行，应用页面也读不到 iframe 内容。
+2. **Rust 负责的写信框**（`composer.rs`）：结论是“输入、光标、输入法交给浏览器的 contenteditable，其余由 Rust 负责”，不引入 JS 编辑器库。格式命令（粗体、斜体、下划线、列表、链接、清除格式）经 `document.execCommand` 执行；每次输入后 Rust 读回 HTML 并用白名单清洗，粘贴后清洗并写回；`html_to_text` 生成发信用的 text/plain 部分；“填入 AI 草稿”把纯文本转成段落。完全用 Rust 自绘编辑器（自己处理光标、选区、输入法）工作量过大，不建议。
+
+**M1 待做**：
+
+1. 把 `ai` 接进界面：来信下显示问题与选项，点选后流式生成草稿到写信框，改选项时显示修改对比（用 `DiffSpan` 渲染）。
+2. 来信中的链接：现在 sandbox 会拦截点击；需要改为在系统浏览器中打开（例如由 Rust 在清洗时给链接加标记，点击由应用接管）。
+3. 输入法与粘贴的真机验证（Windows WebView2）：中文输入法组字时不能被读回和写回打断；`execCommand` 在 WebView2 上的行为。
+4. 键盘快捷键（Ctrl+B 等）、撤销/重做在写回后的表现。
+5. Windows 和 macOS 上运行 `--selftest`（目前只在 Linux CI 上跑）。
+
 ### 下一步
 
-开始 M1（Dioxus 界面原型）。第一个任务是验证两件高风险的事：用 Rust 在 Dioxus 中自研富文本写信框（基于 contenteditable）是否可行，以及 HTML 邮件放在 `sandbox` iframe 加严格 CSP 中、碰不到应用接口。上面 M0 未完成的三项可在具备条件的环境中随时补做。
+继续 M1：先做“M1 待做”第 1 项，把 AI 选项和流式草稿接进界面，再处理链接打开。M0 未完成的三项可在具备条件的环境中随时补做。
 
 ### 已知问题
 
@@ -66,6 +83,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 | `crates/mail-core` | 解析邮件、去掉引用历史、按“回复所有人”规则确定收件人 |
 | `crates/ai` | 提示词、输出校验、修改对比，以及在安全限制下调用本机 CLI |
 | `crates/cli` | `letterdesk` 命令行工具 |
+| `crates/desktop` | `letterdesk-desktop` 桌面界面原型（Dioxus） |
 | `samples/` | 样例邮件（会议与报价、法语邀请、中文合同、多问题、群发确认、转发、收据、恶意指令）及分析预期 |
 
 ## 构建
@@ -121,6 +139,16 @@ Letterdesk 只调用你原样安装的官方 CLI，不读取、不保存任何�
 - 在新建的空临时目录中运行，结束后删除；邮件内容只经标准输入传入；
 - 邮件放在带随机标记的分隔符内，提示词要求模型不执行其中的任何指令；
 - 只接受符合 JSON Schema 的输出，并核对“原句”确实出现在来信中，不合格的输出直接丢弃。
+
+## 桌面界面原型
+
+Linux 需要先安装 WebKitGTK：`sudo apt-get install libwebkit2gtk-4.1-dev libxdo-dev libgtk-3-dev`；Windows（WebView2）和 macOS 无需额外安装。
+
+```sh
+cargo run -p letterdesk-desktop                                   # 默认打开 samples/html-newsletter.eml
+cargo run -p letterdesk-desktop -- --email samples/maya-meeting.eml --draft reply.txt
+cargo run -p letterdesk-desktop -- --selftest                     # 隔离与清洗自检，全部通过时退出码为 0
+```
 
 ## 测试
 
