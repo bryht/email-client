@@ -1,0 +1,22 @@
+[package]
+name = "ai"
+description = "Letterdesk 的 AI 层：通过本机 CLI 分析来信、生成和改写回信草稿"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mail-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+similar = { workspace = true, features = ["unicode"] }
+tempfile.workspace = true
+wait-timeout.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true

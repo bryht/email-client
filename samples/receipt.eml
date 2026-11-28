@@ -1,0 +1,14 @@
+From: Example Cloud <no-reply@cloud.example.com>
+To: lin@example.com
+Subject: Your receipt for March 2026
+Date: Sun, 01 Mar 2026 00:05:00 +0000
+Message-ID: <receipt-202603@cloud.example.com>
+Content-Type: text/plain; charset=utf-8
+
+Thanks for your payment.
+
+Plan: Team (monthly)
+Amount: USD 24.00
+Payment method: Visa ending 4242
+
+This is an automated message. Please do not reply.

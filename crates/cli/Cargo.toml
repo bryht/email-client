@@ -1,0 +1,19 @@
+[package]
+name = "letterdesk-cli"
+description = "Letterdesk AI 命令行原型：分析来信、按选择生成和改写回信草稿"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "letterdesk"
+path = "src/main.rs"
+
+[dependencies]
+mail-core.workspace = true
+ai.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true

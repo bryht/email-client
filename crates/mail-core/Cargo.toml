@@ -1,0 +1,13 @@
+[package]
+name = "mail-core"
+description = "Letterdesk 邮件领域模型：解析邮件、确定回复对象"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mail-parser.workspace = true
+serde.workspace = true
+thiserror.workspace = true
