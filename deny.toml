@@ -25,7 +25,9 @@ confidence-threshold = 0.9
 
 [bans]
 multiple-versions = "warn"
-wildcard-dependencies = "deny"
+wildcards = "deny"
+# 工作区内部的路径依赖不发布到 crates.io，允许不写版本号。
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

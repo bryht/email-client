@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/bryht/email-client"
+publish = false
 
 [workspace.dependencies]
 anyhow = "1"
