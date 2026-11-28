@@ -1,41 +1,13 @@
-//! 把同步结果保存为 `.eml` 目录，并在目录中的 `sync-state.json` 记录同步状态。
+//! 按文件夹向 SQLite 提交 Outlook 的邮件与增量检查点。
 
 use crate::SyncError;
 use crate::outlook::OutlookClient;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use mail_store::Store;
+use std::collections::BTreeSet;
+use std::path::Path;
 
 /// Outlook 同步的文件夹（Graph 的 well-known 名称）。
 pub const OUTLOOK_FOLDERS: [&str; 3] = ["inbox", "sentitems", "drafts"];
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SyncState {
-    /// Outlook：文件夹 → deltaLink。
-    #[serde(default)]
-    pub delta_links: BTreeMap<String, String>,
-    /// Gmail（IMAP）：文件夹 → UIDVALIDITY 与已下载的 UID。
-    #[serde(default)]
-    pub imap: BTreeMap<String, crate::gmail::ImapFolderState>,
-}
-
-impl SyncState {
-    fn path(dir: &Path) -> PathBuf {
-        dir.join("sync-state.json")
-    }
-
-    pub fn load(dir: &Path) -> Self {
-        std::fs::read_to_string(Self::path(dir))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
-
-    pub fn save(&self, dir: &Path) -> std::io::Result<()> {
-        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(Self::path(dir), text)
-    }
-}
 
 /// 一次同步的统计。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,7 +17,7 @@ pub struct SyncStats {
 }
 
 /// 文件名只保留安全字符，避免服务器返回的 id 构成路径。
-fn file_name(id: &str) -> String {
+fn legacy_file_name(id: &str) -> String {
     let safe: String = id
         .chars()
         .map(|c| {
@@ -60,34 +32,45 @@ fn file_name(id: &str) -> String {
 }
 
 /// 增量同步 Outlook 的收件箱、已发送和草稿到 `dir`。
-/// 新邮件下载为 `<id>.eml`，删除的邮件移除对应文件；完成后保存 deltaLink。
 pub fn sync_outlook_to_dir(client: &mut OutlookClient, dir: &Path) -> Result<SyncStats, SyncError> {
-    std::fs::create_dir_all(dir)?;
-    let mut state = SyncState::load(dir);
+    let mut store = Store::open(dir)?;
     let mut stats = SyncStats::default();
     for folder in OUTLOOK_FOLDERS {
-        let link = state.delta_links.get(folder).cloned();
-        let changes = client.sync_folder(folder, link.as_deref())?;
-        for m in &changes.upserted {
-            let path = dir.join(file_name(&m.id));
-            if !path.exists() {
-                let raw = client.download(&m.id)?;
-                std::fs::write(&path, raw)?;
-                stats.downloaded += 1;
-            }
+        let mut update = store.begin_folder()?;
+        let link = update.state.delta_links.get(folder);
+        let mut ids = BTreeSet::new();
+        if update.state.refresh_graph_ids.remove(folder) {
+            // 先恢复不可逆的旧文件名，再用原检查点追回期间的新增与删除。
+            ids.extend(
+                client
+                    .sync_folder(folder, None)?
+                    .upserted
+                    .into_iter()
+                    .map(|m| m.id),
+            );
         }
+        let changes = client.sync_folder(folder, link.map(String::as_str))?;
+        ids.extend(changes.upserted.into_iter().map(|m| m.id));
         for id in &changes.removed {
-            let path = dir.join(file_name(id));
-            if path.exists() {
-                std::fs::remove_file(path)?;
+            ids.remove(id);
+            let key = format!("{id}.eml");
+            let legacy_removed = update.remove_legacy_alias(&key, &legacy_file_name(id))?;
+            if update.delete(&key)? || legacy_removed {
                 stats.removed += 1;
             }
         }
-        // 每个文件夹完成后就保存，中途失败时下次从这里继续。
-        state
+        for id in ids {
+            let raw = client.download(&id)?;
+            let key = format!("{id}.eml");
+            update.remove_legacy_alias(&key, &legacy_file_name(&id))?;
+            update.replace(&key, &raw)?;
+            stats.downloaded += 1;
+        }
+        update
+            .state
             .delta_links
             .insert(folder.to_string(), changes.delta_link);
-        state.save(dir)?;
+        update.commit()?;
     }
     Ok(stats)
 }
@@ -97,9 +80,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_names_are_sanitized() {
-        assert_eq!(file_name("AAMkAG00000001"), "AAMkAG00000001.eml");
-        assert_eq!(file_name("../../etc/passwd"), "______etc_passwd.eml");
-        assert_eq!(file_name("a+b/c="), "a_b_c_.eml");
+    fn legacy_file_names_are_sanitized() {
+        assert_eq!(legacy_file_name("AAMkAG00000001"), "AAMkAG00000001.eml");
+        assert_eq!(legacy_file_name("../../etc/passwd"), "______etc_passwd.eml");
+        assert_eq!(legacy_file_name("a+b/c="), "a_b_c_.eml");
     }
 }

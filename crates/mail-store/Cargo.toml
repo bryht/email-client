@@ -1,0 +1,18 @@
+[package]
+name = "mail-store"
+description = "Letterdesk 的本地邮箱数据库"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -2,7 +2,7 @@
 
 Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人浏览往来，并用 AI 辅助阅读和回复邮件。方案见 [docs/PLAN.md](docs/PLAN.md)。
 
-当前阶段：第一步 **AI 命令行原型**。还没有图形界面，也不连接真实邮箱；它读取 `.eml` 文件，通过本机安装的 Claude Code、Ollama（或实验性的 Codex）找出来信里需要你决定的问题，按你的选择生成回信草稿，并在你修改决定后整篇改写、显示修改对比。
+当前可在桌面端按人浏览邮件，用 AI 辅助起草并发送回信。Outlook 和 Gmail 已通过模拟服务联调，真实账号验证仍待完成。同步数据保存在本地 SQLite 邮箱，也可直接打开样例 `.eml`。
 
 ## 实施进度（交接说明）
 
@@ -21,7 +21,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 |---|---|---|
 | M0 | AI 命令行原型 | 完成；Ollama、Codex、Windows 真机实测待具备条件的环境补做 |
 | M1 | Dioxus 界面原型：Rust 自研富文本编辑器、HTML 邮件隔离 | 进行中：两项高风险验证已通过，见“M1 进展” |
-| M2 | 收信与按人浏览（Outlook / Graph、Gmail / IMAP） | 进行中：对话归组已完成，见“M2 进展” |
+| M2 | 收信与按人浏览（Outlook / Graph、Gmail / IMAP） | 进行中：按人浏览、模拟邮箱增量同步和 SQLite 本地存储已完成 |
 | M3 | 发信与草稿同步 | 进行中：回信发送已完成，见“M3 进展” |
 | M4 | 多账号、Outlook 日历（只读）、签名、通知与托盘 | 未开始 |
 | M5 | 签名安装包，GitHub Releases 与 winget 发布 | 未开始 |
@@ -52,7 +52,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 ### M1 进展
 
-`crates/desktop`（`letterdesk-desktop`）是界面原型：左侧导航（Mail / People / Calendar）、中间阅读区和“回复建议”面板、右侧写信框。当前只读一封 `.eml`（默认 `samples/html-newsletter.eml`），还没有接入邮箱。
+`crates/desktop`（`letterdesk-desktop`）是界面原型：左侧导航（Mail / People / Calendar）、中间阅读区和“回复建议”面板、右侧写信框。默认打开 `samples/html-newsletter.eml`；传入 `--mailbox` 可浏览邮箱，配合 `--account` 可同步和回信。
 
 **AI 已接入界面**（`ai_panel.rs`）：点“分析这封邮件”后显示摘要、问题、原句和选项按钮（含“稍后答复”和自写意图输入框），可填补充说明、选语气；“生成草稿”把正文边生成边写进写信框，并提供回译；已有草稿时按钮变为“按新选择改写”，以写信框当前内容（含手改）为基础整篇改写，显示修改对比，由用户“采用”或“放弃”。模型调用在后台线程执行，经通道回到界面。`--autopilot` 会自动走一遍“分析 → 每题选第一个选项 → 生成 → 改选第一个问题 → 改写”，并把结果以 `AUTOPILOT {json}` 打印到标准输出，便于在无界面环境中检查。已用本机 Claude Code 实测：改选会议决定后，修改对比只涉及会议相关的句子，折扣段落保持不变。
 
@@ -90,7 +90,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 12 个单元测试覆盖以上规则，其中一个用 `samples/` 的真实样例。
 
-**按人浏览界面**（`crates/desktop/src/inbox.rs`）：`--mailbox 目录` 读取目录中所有 `.eml`，`--me` 指定自己的地址。左栏按最近往来列出对话：头像（按地址固定颜色）、参与人名字、第二行显示最近一封的 Cc（PLAN 的 `Cc 名字` 样式）或主题、日期。中间是所选对话的时间线：按话题分隔，每封显示 From / To / Cc 和日期；要回复的那封（最近一封别人发来的）默认显示 HTML 原文，其余显示纯文本摘要，可点“查看原文”展开。回复建议面板和写信框针对要回复的那封邮件，换对话时重置。
+**按人浏览界面**（`crates/desktop/src/inbox.rs`）：`--mailbox 目录` 读取 SQLite 邮箱或目录中的 `.eml`，`--me` 指定自己的地址。左栏按最近往来列出对话：头像（按地址固定颜色）、参与人名字、第二行显示最近一封的 Cc（PLAN 的 `Cc 名字` 样式）或主题、日期。中间是所选对话的时间线：按话题分隔，每封显示 From / To / Cc 和日期；要回复的那封（最近一封别人发来的）默认显示 HTML 原文，其余显示纯文本摘要，可点“查看原文”展开。回复建议面板和写信框针对要回复的那封邮件，换对话时重置。
 
 **模拟服务**（`crates/mock-servers`，命令 `letterdesk-mock`）：在没有真实账号时开发和测试收发信。三个服务共享同一个模拟邮箱（默认载入 `samples/`），路径和协议尽量与真实服务一致，客户端只需换基地址：
 
@@ -100,23 +100,24 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 8 个测试走完整流程（PKCE 登录、分页增量同步、新邮件与删除、下载原文、发信、令牌过期后刷新；IMAP / SMTP 原始对话）。另用 curl 自带的 IMAP/SMTP 客户端验证过：列文件夹、按日期搜索、抓取邮件、发信后出现在“已发送”、错误密码被拒绝。模拟服务为明文连接，仅供本机开发；真实 Gmail 使用 TLS。
 
-**M2 待做**：
+**M2 实施情况**：
 
 1. **Outlook 收信客户端**（`crates/mail-sync`）——**已对着模拟服务完成**：
    - `oauth.rs`：授权码 + PKCE 登录；在回环地址随机端口监听回调，用系统浏览器打开授权页；校验 `state`，防止伪造回调；刷新令牌。
    - `outlook.rs`：`/me`、按文件夹增量同步（跟随 nextLink，保存 deltaLink）、下载原文；访问令牌过期或返回 401 时自动刷新并重试一次。
-   - `maildir.rs`：把收件箱、已发送、草稿同步到 `.eml` 目录，删除的邮件移除对应文件，deltaLink 存在目录里的 `sync-state.json`，每个文件夹完成后就保存，中断后可继续。
+   - `maildir.rs`：把收件箱、已发送、草稿的变更和 deltaLink 按文件夹提交到 SQLite，中断后从上次提交处继续。
    - 命令：`letterdesk sync outlook --base http://127.0.0.1:8901 --client-id <ID> --out mail/`（不填 `--base` 时连接真实的微软服务；`--headless-login` 只能用于模拟服务）。之后 `letterdesk-desktop --mailbox mail/ --me <地址>` 即可浏览。
    - 测试：完整流程（浏览器登录 → 首次同步 → 无变化 → 新邮件与删除 → 令牌过期后自动刷新）和伪造回调被拒绝；另用真实命令跑通“模拟服务 → 同步 → 桌面界面”。
    - **还差**：连接真实账号需要你在 Azure 门户注册一个“公共客户端/本机”应用（允许个人 Microsoft 账号和组织账号，回调 `http://localhost`，委托权限 `Mail.ReadWrite`、`Mail.Send`、`offline_access`、`User.Read`），把**应用（客户端）ID** 给我；客户端 ID 不是机密。HTTPS 目前使用 ureq 内置的 Mozilla 根证书，计划改为系统证书库（企业网络常有自定义根证书）。
 2. **Gmail 收信客户端**（`crates/mail-sync/src/gmail.rs`）——**已对着模拟服务完成**：
-   - IMAP：用 async-imap（Delta Chat 在 Gmail 上长期使用的库）；按 SPECIAL-USE 找收件箱、已发送和草稿，不同步“所有邮件”以免重复下载；文件以 `X-GM-MSGID` 命名，同一封邮件在多个文件夹里只存一份；按 UID 增量同步，`UIDVALIDITY` 变化时重新同步该文件夹；服务器上删除的邮件在没有其他文件夹引用时删除本地文件；默认只同步最近 90 天。状态与 Outlook 共用 `sync-state.json`。
+   - IMAP：用 async-imap（Delta Chat 在 Gmail 上长期使用的库）；按 SPECIAL-USE 找收件箱、已发送和草稿，不同步“所有邮件”以免重复下载；数据库以 `X-GM-MSGID` 去重，同一封邮件在多个文件夹里只存一份；按 UID 增量同步，`UIDVALIDITY` 变化时重新同步该文件夹；服务器上删除的邮件在没有其他文件夹引用时删除本地记录；默认只同步最近 90 天。状态存入同一 SQLite 邮箱。
    - SMTP：`send_gmail` 用 lettre 发出已生成的 MIME 邮件，信封收件人可含 Bcc；不再另存“已发送”（Gmail 会自动保存）。
    - TLS：真实 Gmail 走 993/465 端口 TLS（rustls + ring，Windows 上不需要 C 编译工具链）；明文只用于本机模拟服务。
    - 命令：`letterdesk sync gmail --user <地址> --out mail/ [--days 90 | --all] [--mock 127.0.0.1:1143:1025]`；应用专用密码从环境变量 `LETTERDESK_GMAIL_APP_PASSWORD` 读取，没有时提示输入，不放在命令行参数里（参数在进程列表中可见）。
    - 测试：首次同步 → 无变化 → 新邮件与删除 → SMTP 发信（含 Bcc）后下一次同步取回“已发送”；按天数限制首次同步；错误密码返回登录错误。另用真实命令跑通“模拟服务 → 同步”。
-   - **还差**：用真实 Gmail 账号验证（需要开了两步验证的测试账号和能访问 Gmail 的网络）；写信框“发送”按钮还没有接到 `send_gmail` / Graph `sendMail`。
-3. **本地存储**（`mail-store`）：SQLite 保存邮件和同步状态（Graph 的 deltaLink、IMAP 的 UIDVALIDITY/UID），tantivy 全文搜索。
+   - **还差**：用真实 Gmail 账号验证（需要开了两步验证的测试账号和能访问 Gmail 的网络）。桌面回信进展见 M3。
+3. **SQLite 本地存储已接入命令行和桌面**（`mail-store`）。每个邮箱目录保存一份 `letterdesk.sqlite3`。原始 MIME 和该文件夹的同步进度一起提交；同步出错时，两者一起回滚。首次同步旧目录会导入 `.eml` 和 `sync-state.json`，原文件保留用于备份，后续同步和桌面浏览以数据库为准。旧 Outlook 文件名若可能丢失原始 ID，会重新读取对应文件夹以恢复回信所需的 ID。普通样例目录仍可只读打开。未读状态与全文搜索待做。
+   - 验证：`cargo test -p mail-store -p mail-sync` 覆盖旧目录迁移、事务回滚、修复损坏检查点后重试，以及模拟 Outlook / Gmail 从旧检查点续传、删除和收发回信。
 4. ~~桌面界面：对话列表与时间线~~ 已完成。
 
 **凭据保存**（`crates/mail-sync/src/credentials.rs`）——**已完成**：Outlook 令牌和 Gmail 应用专用密码存入系统凭据管理器（`keyring` 3：Windows 凭据管理器、macOS 钥匙串、Linux Secret Service，Linux 用纯 Rust 的 zbus 实现，不需要 libdbus），条目名为 `outlook:<地址>` / `gmail:<地址>`，服务名 `Letterdesk`，不写入任何文件。
@@ -146,9 +147,9 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 ### 下一步
 
-1. **本地存储**（M2 待做第 3 项）：SQLite 保存邮件与同步状态，替代 `.eml` 目录 + `sync-state.json`，为草稿同步、未读状态和全文搜索打基础。
-2. **M3 待做第 1 项（草稿同步）**。
-3. 桌面界面里添加账号（目前用账号文件）和后台定时同步。
+1. **M3 草稿同步**：先在本地保存未完成的回信并支持重新打开，再接 Outlook 和 Gmail 的草稿箱。验收覆盖重启恢复、远端修改冲突，以及发送成功后移除草稿。
+2. 在桌面界面添加账号，接入后台定时同步。
+3. 补齐 M2 的未读状态和 tantivy 全文搜索。真实 Outlook、Gmail 账号具备条件后分别验收收信与回信。
 
 M1 剩下的待做事项需要 Windows / macOS 真机；M0 未完成的三项可在具备条件的环境中随时补做。
 
@@ -167,7 +168,8 @@ M1 剩下的待做事项需要 Windows / macOS 真机；M0 未完成的三项可
 | `crates/cli` | `letterdesk` 命令行工具 |
 | `crates/desktop` | `letterdesk-desktop` 桌面界面原型（Dioxus） |
 | `crates/mock-servers` | `letterdesk-mock`：本地模拟的微软登录 + Graph 与 Gmail IMAP/SMTP |
-| `crates/mail-sync` | 收信同步：Outlook（微软登录 PKCE + Graph 增量同步）与 Gmail（IMAP 增量同步、SMTP 发信），同步到 `.eml` 目录 |
+| `crates/mail-sync` | 收信同步：Outlook（微软登录 PKCE + Graph 增量同步）与 Gmail（IMAP 增量同步、SMTP 发信） |
+| `crates/mail-store` | SQLite 邮箱、旧目录迁移、按文件夹事务保存 MIME 原文和同步检查点 |
 | `samples/` | 样例邮件（会议与报价、法语邀请、中文合同、多问题、群发确认、转发、收据、恶意指令）及分析预期 |
 
 ## 构建

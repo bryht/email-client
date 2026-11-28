@@ -27,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 同步邮箱到本地 .eml 目录（之后可用 letterdesk-desktop --mailbox 打开）
+    /// 同步邮箱到本地 SQLite 邮箱（之后可用 letterdesk-desktop --mailbox 打开）
     Sync {
         #[command(subcommand)]
         account: SyncAccount,

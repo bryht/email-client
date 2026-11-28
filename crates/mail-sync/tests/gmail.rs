@@ -1,21 +1,11 @@
 //! 对着本地模拟的 Gmail IMAP / SMTP 走完整流程。
 
+use mail_store::Store;
+mod support;
 use mail_sync::SyncError;
 use mail_sync::gmail::{GmailConfig, send_gmail, sync_gmail_to_dir};
-use mail_sync::maildir::SyncState;
 use mock_servers::{APP_PASSWORD, Folder, Mailbox, imap, smtp};
-
-fn eml_files(dir: &std::path::Path) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|e| {
-            let name = e.unwrap().file_name().to_string_lossy().into_owned();
-            name.ends_with(".eml").then_some(name)
-        })
-        .collect();
-    v.sort();
-    v
-}
+use support::read_messages;
 
 fn setup() -> (Mailbox, imap::ImapMock, smtp::SmtpMock, usize) {
     let mailbox = Mailbox::new("lin@example.com", "Lin Chen");
@@ -41,18 +31,26 @@ fn gmail_incremental_sync_and_send() {
     // 首次同步：收件箱 + 已发送里的全部样例，文件按 X-GM-MSGID 命名。
     let stats = sync_gmail_to_dir(&config, dir.path()).unwrap();
     assert_eq!(stats.downloaded, loaded);
-    let files = eml_files(dir.path());
+    let files = read_messages(dir.path());
     assert_eq!(files.len(), loaded);
-    assert!(files.iter().all(|f| f.starts_with("gm-")), "{files:?}");
-    let state = SyncState::load(dir.path());
+    assert!(
+        files.iter().all(|(key, _)| key.starts_with("gm-")),
+        "{files:?}"
+    );
+    let state = Store::open(dir.path())
+        .unwrap()
+        .begin_folder()
+        .unwrap()
+        .state;
     assert!(state.imap.contains_key("INBOX"));
     assert!(state.imap.contains_key("[Gmail]/Sent Mail"));
     assert!(state.imap.contains_key("[Gmail]/Drafts"));
-    for f in &files {
-        mail_core::Email::parse(&std::fs::read(dir.path().join(f)).unwrap()).unwrap();
+    for (_, raw) in &files {
+        mail_core::Email::parse(raw).unwrap();
     }
 
     // 没有变化时不下载。
+    let dir = support::legacy_copy(dir.path(), &state);
     assert_eq!(
         sync_gmail_to_dir(&config, dir.path()).unwrap().downloaded,
         0
@@ -70,7 +68,7 @@ fn gmail_incremental_sync_and_send() {
     mailbox.delete(victim);
     let stats = sync_gmail_to_dir(&config, dir.path()).unwrap();
     assert_eq!((stats.downloaded, stats.removed), (1, 1));
-    assert_eq!(eml_files(dir.path()).len(), loaded);
+    assert_eq!(read_messages(dir.path()).len(), loaded);
 
     // 通过 SMTP 发信：信封收件人含 Bcc；Gmail 自动存入“已发送”，下一次同步取回。
     let raw = b"From: Lin Chen <lin@example.com>\r\nTo: carol@example.com\r\nSubject: Re: Ping\r\nMessage-ID: <reply@x>\r\nIn-Reply-To: <ping@x>\r\n\r\nPong.\r\n";
@@ -91,8 +89,8 @@ fn gmail_incremental_sync_and_send() {
         sync_gmail_to_dir(&config, dir.path()).unwrap().downloaded,
         1
     );
-    let found = eml_files(dir.path()).iter().any(|f| {
-        let e = mail_core::Email::parse(&std::fs::read(dir.path().join(f)).unwrap()).unwrap();
+    let found = read_messages(dir.path()).iter().any(|(_, raw)| {
+        let e = mail_core::Email::parse(raw).unwrap();
         e.subject == "Re: Ping" && e.in_reply_to == vec!["ping@x".to_string()]
     });
     assert!(found);

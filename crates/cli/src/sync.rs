@@ -1,4 +1,4 @@
-//! `letterdesk sync`：把邮箱同步到本地 `.eml` 目录。
+//! `letterdesk sync`：把邮箱同步到本地 SQLite 邮箱。
 
 use crate::SyncAccount;
 use anyhow::{Context, Result, bail};

@@ -6,6 +6,16 @@ use crate::oauth::{OutlookConfig, Tokens, refresh};
 use crate::send::{SendReport, SendStatus};
 use serde_json::{Value, json};
 
+/// Graph 的 ID 是不透明的字符串，作为单个 URL 路径段传送。
+fn message_path_id(id: &str) -> percent_encoding::PercentEncode<'_> {
+    const ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    percent_encoding::utf8_percent_encode(id, ESCAPE)
+}
+
 /// 一封邮件的摘要（来自 delta 结果）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageSummary {
@@ -168,6 +178,7 @@ impl OutlookClient {
 
     /// 下载一封邮件的 MIME 原文。
     pub fn download(&mut self, id: &str) -> Result<Vec<u8>, SyncError> {
+        let id = message_path_id(id);
         let url = format!("{}/v1.0/me/messages/{id}/$value", self.config.graph);
         let mut res = self.get(&url)?;
         if res.status().as_u16() != 200 {
@@ -238,12 +249,13 @@ impl OutlookClient {
     }
 
     /// 回复全部：先用 `createReplyAll` 生成带线程信息的草稿，写入用户确认的收件人和正文，再发送。
-    /// `original_id` 是原信的 Graph id（同步目录中的文件名）。
+    /// `original_id` 是原信的 Graph id。
     pub fn reply_all(
         &mut self,
         original_id: &str,
         draft: &ReplyDraft,
     ) -> Result<SendReport, SyncError> {
+        let original_id = message_path_id(original_id);
         let base = format!("{}/v1.0/me/messages", self.config.graph);
         let (status, created) = self.call(
             "POST",
@@ -267,7 +279,11 @@ impl OutlookClient {
             "ccRecipients": Self::recipients(&draft.cc),
             "body": { "contentType": "HTML", "content": draft.html },
         });
-        let (status, body) = self.call("PATCH", &format!("{base}/{draft_id}"), Some(&patch))?;
+        let (status, body) = self.call(
+            "PATCH",
+            &format!("{base}/{}", message_path_id(&draft_id)),
+            Some(&patch),
+        )?;
         if status != 200 {
             return Err(SyncError::Protocol(format!(
                 "无法保存回复草稿：{status} {}",
@@ -284,6 +300,7 @@ impl OutlookClient {
 
     /// 发送一份草稿；失败或没有确认时到“已发送”核对。也用于“重试”。
     pub fn send_draft(&mut self, draft_id: &str, message_id: &str) -> SendStatus {
+        let draft_id = message_path_id(draft_id);
         let url = format!("{}/v1.0/me/messages/{draft_id}/send", self.config.graph);
         let error = match self.call("POST", &url, None) {
             Ok((202, _)) | Ok((200, _)) => return SendStatus::Sent,

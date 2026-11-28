@@ -13,6 +13,7 @@ name = "letterdesk-desktop"
 path = "src/main.rs"
 
 [dependencies]
+mail-store = { path = "../mail-store" }
 mail-core.workspace = true
 dioxus = { version = "0.7", features = ["desktop"] }
 ammonia = "4"

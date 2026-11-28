@@ -143,7 +143,7 @@ impl AccountConfig {
         }
     }
 
-    /// 回复 `original`。`original_id` 是同步目录中的文件名（不含扩展名），Outlook 用它找到原信。
+    /// 回复 `original`。`original_id` 是原信的服务端标识，Outlook 用它找到原信。
     pub fn reply(
         &self,
         store: &dyn SecretStore,

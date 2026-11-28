@@ -1,29 +1,19 @@
 //! 对着本地模拟服务走完整流程：浏览器登录（PKCE）→ 首次同步 → 无变化 → 新邮件与删除 → 令牌过期后自动刷新。
 
-use mail_sync::maildir::{SyncState, sync_outlook_to_dir};
+use mail_store::Store;
+mod support;
+use mail_sync::maildir::sync_outlook_to_dir;
 use mail_sync::oauth::{OutlookConfig, begin_login};
 use mail_sync::outlook::OutlookClient;
 use mock_servers::{CLIENT_ID, Mailbox, graph};
 use std::time::Duration;
+use support::read_messages;
 
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .build()
         .into()
-}
-
-fn eml_count(dir: &std::path::Path) -> usize {
-    std::fs::read_dir(dir)
-        .unwrap()
-        .filter(|e| {
-            e.as_ref()
-                .unwrap()
-                .path()
-                .extension()
-                .is_some_and(|x| x == "eml")
-        })
-        .count()
 }
 
 #[test]
@@ -59,22 +49,23 @@ fn outlook_login_and_incremental_sync() {
     let dir = tempfile::tempdir().unwrap();
     let stats = sync_outlook_to_dir(&mut client, dir.path()).unwrap();
     assert_eq!(stats.downloaded, loaded);
-    assert_eq!(eml_count(dir.path()), loaded);
-    let state = SyncState::load(dir.path());
+    assert_eq!(read_messages(dir.path()).len(), loaded);
+    let state = Store::open(dir.path())
+        .unwrap()
+        .begin_folder()
+        .unwrap()
+        .state;
     assert_eq!(state.delta_links.len(), 3);
 
     // 下载的邮件可以解析，并能按人归组。
-    let emails: Vec<mail_core::Email> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(|e| {
-            let p = e.unwrap().path();
-            (p.extension()? == "eml")
-                .then(|| mail_core::Email::parse(&std::fs::read(p).unwrap()).unwrap())
-        })
+    let emails: Vec<_> = read_messages(dir.path())
+        .iter()
+        .map(|(_, raw)| mail_core::Email::parse(raw).unwrap())
         .collect();
     assert_eq!(emails.len(), loaded);
 
     // 没有变化时不下载。
+    let dir = support::legacy_copy(dir.path(), &state);
     assert_eq!(
         sync_outlook_to_dir(&mut client, dir.path())
             .unwrap()
@@ -92,8 +83,12 @@ fn outlook_login_and_incremental_sync() {
         .unwrap();
     let stats = sync_outlook_to_dir(&mut client, dir.path()).unwrap();
     assert_eq!((stats.downloaded, stats.removed), (1, 1));
-    assert_eq!(eml_count(dir.path()), loaded);
-    assert!(!dir.path().join("AAMkAG00000001.eml").exists());
+    assert_eq!(read_messages(dir.path()).len(), loaded);
+    assert!(
+        read_messages(dir.path())
+            .iter()
+            .all(|(key, _)| key != "AAMkAG00000001.eml")
+    );
 
     // 访问令牌失效：客户端用刷新令牌换新令牌后继续同步。
     let before = client.tokens().clone();

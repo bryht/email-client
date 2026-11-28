@@ -4,18 +4,18 @@
 //!
 //! Gmail 的特点与处理方式：
 //! - 按 SPECIAL-USE 标记找到收件箱、已发送（\Sent）和草稿（\Drafts），不同步“所有邮件”，避免重复下载；
-//! - 同一封邮件可能同时在多个文件夹里，用 `X-GM-MSGID` 命名文件以去重；
+//! - 同一封邮件可能同时在多个文件夹里，用 `X-GM-MSGID` 作为存储键去重；
 //! - 按 UID 增量同步，`UIDVALIDITY` 变化时重新同步该文件夹；
 //! - 发信后 Gmail 会自动存入“已发送”，客户端不再另存。
 
 use crate::SyncError;
 use crate::compose::{ReplyDraft, build_reply};
-use crate::maildir::{SyncState, SyncStats};
+use crate::maildir::SyncStats;
 use crate::send::{SendReport, SendStatus};
 use async_imap::Client;
 use async_imap::types::NameAttribute;
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
+use mail_store::{ImapFolderState, Store};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -77,14 +77,6 @@ impl GmailConfig {
     }
 }
 
-/// 一个 IMAP 文件夹的同步状态。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ImapFolderState {
-    pub uid_validity: u32,
-    /// UID → 文件名。
-    pub files: BTreeMap<u32, String>,
-}
-
 fn runtime() -> Result<tokio::runtime::Runtime, SyncError> {
     Ok(tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -95,7 +87,7 @@ fn imap_err(e: impl std::fmt::Display) -> SyncError {
     SyncError::Protocol(format!("IMAP：{e}"))
 }
 
-/// 文件名：有 X-GM-MSGID 时用它（跨文件夹去重），否则用文件夹 + UIDVALIDITY + UID。
+/// 沿用旧目录的逻辑键：有 X-GM-MSGID 时用它（跨文件夹去重），否则用文件夹 + UIDVALIDITY + UID。
 fn file_name(gm_msgid: Option<u64>, folder: &str, uid_validity: u32, uid: u32) -> String {
     match gm_msgid {
         Some(id) => format!("gm-{id}.eml"),
@@ -116,7 +108,7 @@ fn since_date(days: u32) -> String {
     format!("{}-{month}-{}", date.day(), date.year())
 }
 
-/// 同步 Gmail 的收件箱、已发送和草稿到 `dir`（与 Outlook 同步使用相同的目录格式）。
+/// 同步 Gmail 的收件箱、已发送和草稿到 `dir` 下的 SQLite 邮箱。
 pub fn sync_gmail_to_dir(config: &GmailConfig, dir: &Path) -> Result<SyncStats, SyncError> {
     std::fs::create_dir_all(dir)?;
     let rt = runtime()?;
@@ -196,7 +188,7 @@ where
     }
     let folders: Vec<String> = std::iter::once(inbox).chain(sent).chain(drafts).collect();
 
-    let mut state = SyncState::load(dir);
+    let mut store = Store::open(dir)?;
     let mut stats = SyncStats::default();
     let query = match config.since_days {
         Some(days) => format!("SINCE {}", since_date(days)),
@@ -206,9 +198,12 @@ where
     for folder in &folders {
         let mailbox = session.select(folder).await.map_err(imap_err)?;
         let validity = mailbox.uid_validity.unwrap_or(0);
-        let mut fstate = state.imap.remove(folder).unwrap_or_default();
+        let mut update = store.begin_folder()?;
+        let mut fstate = update.state.imap.remove(folder).unwrap_or_default();
+        let mut obsolete = HashSet::new();
         if fstate.uid_validity != validity {
             // UID 已失效：丢掉旧记录，重新同步这个文件夹。
+            obsolete.extend(fstate.files.into_values());
             fstate = ImapFolderState {
                 uid_validity: validity,
                 files: BTreeMap::new(),
@@ -245,9 +240,7 @@ where
                     continue;
                 };
                 let name = file_name(fetch.gmail_msg_id().copied(), folder, validity, uid);
-                let path = dir.join(&name);
-                if !path.exists() {
-                    std::fs::write(&path, body)?;
+                if update.insert(&name, body)? {
                     stats.downloaded += 1;
                 }
                 fstate.files.insert(uid, name);
@@ -255,21 +248,21 @@ where
         }
         for uid in gone {
             if let Some(name) = fstate.files.remove(&uid) {
-                // 其他文件夹仍引用同一封邮件（例如发给自己的邮件）时保留文件。
-                let still_used = fstate.files.values().any(|n| n == &name)
-                    || state
-                        .imap
-                        .values()
-                        .any(|s| s.files.values().any(|n| n == &name));
-                let path = dir.join(&name);
-                if !still_used && path.exists() {
-                    std::fs::remove_file(path)?;
-                    stats.removed += 1;
-                }
+                obsolete.insert(name);
             }
         }
-        state.imap.insert(folder.clone(), fstate);
-        state.save(dir)?;
+        update.state.imap.insert(folder.clone(), fstate);
+        for other in update.state.imap.values() {
+            for name in other.files.values() {
+                obsolete.remove(name);
+            }
+        }
+        for name in obsolete {
+            if update.delete(&name)? {
+                stats.removed += 1;
+            }
+        }
+        update.commit()?;
     }
     let _ = session.logout().await;
     Ok(stats)

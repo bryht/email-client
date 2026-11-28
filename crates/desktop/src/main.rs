@@ -39,7 +39,7 @@ const USAGE: &str = "用法：letterdesk-desktop [--mailbox 目录] [--account �
 #[derive(Debug, Clone)]
 pub struct Args {
     pub emails: Vec<Email>,
-    /// 每封邮件在同步目录中的文件名（不含扩展名），与 `emails` 一一对应。
+    /// 每封邮件的来源标识（Outlook 使用 Graph ID），与 `emails` 一一对应。
     pub ids: Vec<String>,
     /// `--mailbox` 目录；配置了账号时同步到这里。
     pub mailbox_dir: Option<PathBuf>,
@@ -66,15 +66,27 @@ fn stem(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 读取目录中所有 `.eml`，返回 (邮件, 文件名) 列表。
+/// 同步邮箱优先读 SQLite；普通 .eml 目录仍可直接浏览。
 pub fn load_mailbox(dir: &Path) -> Result<Vec<(Email, String)>, String> {
+    let mut emails = Vec::new();
+    let stored = mail_store::visit_messages(dir, |key, raw| match Email::parse(&raw) {
+        Ok(email) => {
+            // 逻辑键沿用 .eml 扩展名；Graph ID 自身可以包含点或路径分隔符。
+            let id = key.rsplit_once('.').map_or(key.as_str(), |(id, _)| id);
+            emails.push((email, id.to_owned()));
+        }
+        Err(e) => eprintln!("跳过 {key}：{e}"),
+    })
+    .map_err(|e| e.to_string())?;
+    if stored {
+        return Ok(emails);
+    }
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| format!("无法读取目录 {}：{e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("eml")))
         .collect();
     paths.sort();
-    let mut emails = Vec::new();
     for p in paths {
         match load_eml(&p) {
             Ok(e) => emails.push((e, stem(&p))),
