@@ -94,6 +94,52 @@ pub fn recipients(r: &ReplyRecipients) {
     }
 }
 
+/// 执行流式生成：先显示标题，再把正文边生成边打印。
+/// 返回结果以及正文是否已经显示过（不支持流式输出的后端不会显示）。
+pub fn streaming<T, E>(
+    label: &str,
+    faint: bool,
+    f: impl FnOnce(&mut dyn FnMut(&str)) -> Result<T, E>,
+) -> (Result<T, E>, bool) {
+    let start = Instant::now();
+    eprintln!("{label}…");
+    let mut shown = 0usize;
+    let mut out = std::io::stdout();
+    let result = f(&mut |body: &str| {
+        // 正文只会变长；打印新增的部分。
+        if let Some(new) = body.get(shown..) {
+            let text = if faint { dim(new) } else { new.to_string() };
+            let _ = write!(out, "{text}");
+            let _ = out.flush();
+            shown = body.len();
+        }
+    });
+    if shown > 0 {
+        println!();
+    }
+    let secs = start.elapsed().as_secs_f32();
+    match &result {
+        Ok(_) => eprintln!("完成（{secs:.1} 秒）"),
+        Err(_) => eprintln!("失败（{secs:.1} 秒）"),
+    }
+    (result, shown > 0)
+}
+
+/// 显示草稿；正文已在流式生成时显示过的，只补充语言和回译。
+pub fn draft_after_stream(d: &Draft, body_shown: bool) {
+    if body_shown {
+        println!("{}", dim(&format!("（草稿语言：{}）", d.language)));
+        if let Some(back) = &d.back_translation {
+            println!();
+            println!("{}", dim("── 回译 ──"));
+            println!("{}", dim(back));
+        }
+        println!();
+    } else {
+        draft(d);
+    }
+}
+
 pub fn draft(d: &Draft) {
     println!("{}", bold(&format!("── 草稿（{}）──", d.language)));
     println!("{}", d.body);

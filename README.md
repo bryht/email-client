@@ -19,7 +19,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 | # | 里程碑 | 状态 |
 |---|---|---|
-| M0 | AI 命令行原型 | 基本完成，见下方“未完成” |
+| M0 | AI 命令行原型 | 完成；Ollama、Codex、Windows 真机实测待具备条件的环境补做 |
 | M1 | Dioxus 界面原型：Rust 自研富文本编辑器、HTML 邮件隔离 | 未开始 |
 | M2 | 收信与按人浏览（Outlook / Graph、Gmail / IMAP） | 未开始 |
 | M3 | 发信与草稿同步 | 未开始 |
@@ -34,24 +34,25 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
   - `Assistant::draft`：按决定生成草稿和回译；决定可以是选项、自写意图（可中文）或“稍后答复”。
   - `Assistant::revise`：以当前草稿为基础整篇改写，返回修改对比。传入生成依据 `DraftBasis`（生成当前草稿时的决定），提示词把每个问题标为 `[CHANGED]` 或 `[UNCHANGED]`，只改动变化了的决定，保留用户手改内容。
   - `cli::CliBackend`：调用本机 Claude Code / Ollama / Codex，遵守 PLAN 第 4 节的安全限制；Codex 标记为未验证，默认拒绝。
+  - 流式输出：`Assistant::draft_streaming` / `revise_streaming` 在生成过程中回调已生成的正文。Claude Code 用 `--output-format stream-json --include-partial-messages`，从 `input_json_delta` 片段拼出 JSON，再用 `partial_string_field` 取出不完整 JSON 里的 `body`；Ollama 直接读取流式 JSON 文本。
+  - Windows：目标是 npm 的 `.cmd` 批处理文件时，把参数里的换行压平（`batch_safe_args`），避免 cmd.exe 无法传递多行参数。
   - 提示词把邮件和草稿放在带随机标记的不可信数据分隔符内；输出按 JSON Schema 校验。
-- `letterdesk` 命令行：`analyze`、`draft`、`revise`、交互式 `reply`；`draft` / `revise --out` 会在草稿旁保存 `<草稿>.basis.json` 作为生成依据。
-- 样例邮件（`samples/`）、单元测试（29 个）、对真实 CLI 的安全验收测试（`crates/ai/tests/live_cli.rs`，默认忽略）。
+- `letterdesk` 命令行：`analyze`、`draft`、`revise`、交互式 `reply`；草稿边生成边显示；`draft` / `revise --out` 会在草稿旁保存 `<草稿>.basis.json` 作为生成依据。
+- 样例邮件 8 封（`samples/`）及分析预期（`samples/expectations.json`）。
+- 测试：单元测试 35 个；Windows 专用测试（`crates/ai/tests/windows_cmd_shim.rs`，用与 npm 相同结构的假 `.cmd` 验证含换行、引号、`%`、`&`、JSON 的参数和中文标准输入能完整传递）；对真实 CLI 的安全验收测试（`live_cli.rs`）和提示词回归检查（`live_samples.rs`），后两者默认忽略。
 - CI：Windows / macOS / Linux 上运行 fmt、clippy、测试；`cargo-deny` 检查依赖许可与安全漏洞。
 
-**已验证**（本机 Claude Code 2.1）：Maya 样例的分析、中文决定生成英文草稿与回译、手改 5%→3% 后只改会议决定时 3% 被保留、收据判断为不需要回复、法语邀请生成法语草稿；两项安全验收测试通过。
+**已验证**（本机 Claude Code 2.1）：Maya 样例的分析、中文决定生成英文草稿与回译、手改 5%→3% 后只改会议决定时 3% 被保留、收据判断为不需要回复、法语邀请生成法语草稿；两项安全验收测试通过；8 封样例的回归检查全部符合预期且原句全部核对通过；流式输出在约 3 秒时开始显示正文（完整结果约 5 秒）。Windows CI 上假 `.cmd` 测试通过。
 
-### M0 未完成
+### M0 未完成（当前环境做不了，需要换环境）
 
-1. **Ollama 实测**：用 `LETTERDESK_LIVE=ollama LETTERDESK_LIVE_MODEL=<模型>` 跑安全验收测试，并用样例邮件试一遍 `reply`。确认 `ollama run --format json` 的输出能稳定通过校验。
-2. **Codex**：确认能否完全关闭命令执行工具并限制文件读取；能做到就把 `CliKind::Codex.safety()` 改为 `Enforced` 并补测试，做不到就保持默认拒绝。同时补充 PLAN 第 4 节的 Codex 条款说明（需要读 OpenAI 的官方说明）。
-3. **Windows 验证**：npm 安装的 `claude` 是 `.cmd` 文件，`resolve_program` 会找到它，但 Rust 调用 `.cmd` 时对含引号、换行的参数（`--system-prompt`、`--json-schema`）可能拒绝执行或转义出错。需要在 Windows 上实测；必要时改为把系统提示并入标准输入，或在 CLI 支持时改用从文件读取提示词的参数。
-4. **流式输出**：Claude Code 可用 `--output-format stream-json`；界面阶段需要边生成边显示草稿。
-5. **提示词回归语料**：扩充 `samples/`（多问题、群发确认出席、带抄送与转发、长线程、中文来信），为分析和改写建立可重复的检查。
+1. **Ollama 实测**：本云端环境的网络策略拦截了 ollama.com 和 GitHub Releases 的下载，无法安装。需在装有 Ollama 的电脑上运行：`LETTERDESK_LIVE=ollama LETTERDESK_LIVE_MODEL=<模型> cargo test -p ai --test live_cli --test live_samples -- --ignored`，并试一遍 `letterdesk reply --backend ollama --model <模型>`。重点确认 `ollama run --format json` 的输出能稳定通过校验、流式输出能逐步显示正文。
+2. **Codex**：需要 OpenAI 账号登录。确认能否完全关闭命令执行工具并限制文件读取；能做到就把 `CliKind::Codex.safety()` 改为 `Enforced` 并补测试，做不到就保持默认拒绝。同时补充 PLAN 第 4 节的 Codex 条款说明（需要读 OpenAI 的官方说明）。
+3. **Windows 真机**：CI 已用假 `.cmd` 验证参数传递；仍建议在 Windows 上用真实的 npm 版 `claude` 跑一次 `live_cli`。
 
 ### 下一步
 
-按顺序：先完成上面的 M0 未完成 1 到 3，再开始 M1（Dioxus 界面原型）。M1 的第一个任务是验证两件高风险的事：用 Rust 在 Dioxus 中自研富文本写信框（基于 contenteditable）是否可行，以及 HTML 邮件放在 `sandbox` iframe 加严格 CSP 中、碰不到应用接口。
+开始 M1（Dioxus 界面原型）。第一个任务是验证两件高风险的事：用 Rust 在 Dioxus 中自研富文本写信框（基于 contenteditable）是否可行，以及 HTML 邮件放在 `sandbox` iframe 加严格 CSP 中、碰不到应用接口。上面 M0 未完成的三项可在具备条件的环境中随时补做。
 
 ### 已知问题
 
@@ -65,7 +66,7 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 | `crates/mail-core` | 解析邮件、去掉引用历史、按“回复所有人”规则确定收件人 |
 | `crates/ai` | 提示词、输出校验、修改对比，以及在安全限制下调用本机 CLI |
 | `crates/cli` | `letterdesk` 命令行工具 |
-| `samples/` | 样例邮件：会议与报价、法语邀请、收据、恶意指令 |
+| `samples/` | 样例邮件（会议与报价、法语邀请、中文合同、多问题、群发确认、转发、收据、恶意指令）及分析预期 |
 
 ## 构建
 
@@ -135,6 +136,12 @@ LETTERDESK_LIVE=ollama LETTERDESK_LIVE_MODEL=qwen3 cargo test -p ai --test live_
 ```
 
 它会验证：恶意来信无法让 CLI 创建文件或泄露本地文件内容；即使任务本身要求使用工具，CLI 也无法创建文件。
+
+修改提示词后，运行回归检查，确认 `samples/` 中每封邮件的分析结果仍符合 `samples/expectations.json`：
+
+```sh
+LETTERDESK_LIVE=claude cargo test -p ai --test live_samples -- --ignored --nocapture
+```
 
 ## 许可证
 

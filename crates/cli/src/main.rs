@@ -302,7 +302,17 @@ fn run(cli: Cli) -> Result<()> {
                 draft_lang: choices.draft_lang.as_deref(),
                 my_name: conn.my_name.as_deref(),
             };
-            let draft = render::with_progress("正在生成草稿", || assistant.draft(&req))?;
+            let draft = if json {
+                render::with_progress("正在生成草稿", || assistant.draft(&req))?
+            } else {
+                render::recipients(&email.reply_all_recipients(&conn.me));
+                let (draft, shown) = render::streaming("正在生成草稿", false, |on_body| {
+                    assistant.draft_streaming(&req, on_body)
+                });
+                let draft = draft?;
+                render::draft_after_stream(&draft, shown);
+                draft
+            };
             if let Some(path) = out {
                 std::fs::write(&path, &draft.body)?;
                 save_basis(&path, &req.basis())?;
@@ -310,9 +320,6 @@ fn run(cli: Cli) -> Result<()> {
             }
             if json {
                 println!("{}", serde_json::to_string_pretty(&draft)?);
-            } else {
-                render::recipients(&email.reply_all_recipients(&conn.me));
-                render::draft(&draft);
             }
             Ok(())
         }

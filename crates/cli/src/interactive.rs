@@ -131,15 +131,16 @@ pub fn run<B: Backend>(
     };
     state.note = Some(note).filter(|n| !n.is_empty());
 
-    let draft = render::with_progress("正在生成草稿", || {
-        assistant.draft(&state.request(email, &analysis, my_name))
-    })?;
+    println!();
+    render::recipients(&email.reply_all_recipients(me));
+    let (draft, shown) = render::streaming("正在生成草稿", false, |on_body| {
+        assistant.draft_streaming(&state.request(email, &analysis, my_name), on_body)
+    });
+    let draft = draft?;
     // 当前草稿所依据的决定；只有之后改变了的决定才会改动草稿。
     let mut basis: DraftBasis = state.request(email, &analysis, my_name).basis();
     std::fs::write(out, &draft.body)?;
-    println!();
-    render::recipients(&email.reply_all_recipients(me));
-    render::draft(&draft);
+    render::draft_after_stream(&draft, shown);
     println!(
         "{}",
         render::dim(&format!(
@@ -196,9 +197,15 @@ pub fn run<B: Backend>(
         }
 
         let current = std::fs::read_to_string(out)?;
-        let revision = match render::with_progress("正在改写草稿", || {
-            assistant.revise(&state.request(email, &analysis, my_name), &current, &basis)
-        }) {
+        let (revision, _) = render::streaming("正在改写草稿", true, |on_body| {
+            assistant.revise_streaming(
+                &state.request(email, &analysis, my_name),
+                &current,
+                &basis,
+                on_body,
+            )
+        });
+        let revision = match revision {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("改写失败：{e}");

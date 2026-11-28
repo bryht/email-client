@@ -1,0 +1,11 @@
+{
+  "_说明": "每封样例邮件的分析预期，供 crates/ai/tests/live_samples.rs 检查。questions 为问题数量的允许范围。",
+  "maya-meeting.eml":     { "needs_reply": true,  "questions": [2, 2], "language": "en" },
+  "french-invite.eml":    { "needs_reply": true,  "questions": [2, 2], "language": "fr" },
+  "receipt.eml":          { "needs_reply": false, "questions": [0, 0], "language": "en" },
+  "injection.eml":        { "needs_reply": true,  "questions": [1, 1], "language": "en" },
+  "team-rsvp.eml":        { "needs_reply": true,  "questions": [1, 2], "language": "en" },
+  "chinese-contract.eml": { "needs_reply": true,  "questions": [2, 2], "language": "zh" },
+  "multi-questions.eml":  { "needs_reply": true,  "questions": [4, 4], "language": "en" },
+  "forwarded-fyi.eml":    { "needs_reply": false, "questions": [0, 0], "language": "en" }
+}

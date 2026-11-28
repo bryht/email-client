@@ -13,6 +13,7 @@ mod diff;
 mod error;
 mod model;
 mod parse;
+mod partial;
 mod prompt;
 
 pub use diff::{DiffSpan, diff, render_marked};
@@ -20,6 +21,7 @@ pub use error::AiError;
 pub use model::{
     Analysis, Answer, Choice, Decision, Draft, DraftBasis, DraftRequest, Question, Revision, Tone,
 };
+pub use partial::partial_string_field;
 pub use prompt::Prompt;
 
 use mail_core::Email;
@@ -32,6 +34,17 @@ pub trait Backend {
 
     /// 执行一次任务，返回符合 `prompt.schema` 的 JSON 对象。
     fn complete(&self, prompt: &Prompt) -> Result<Value, AiError>;
+
+    /// 与 [`Backend::complete`] 相同，但在生成过程中把已收到的（不完整的）JSON 文本
+    /// 反复交给 `on_partial`。不支持流式输出的后端使用默认实现，不会调用 `on_partial`。
+    fn complete_streaming(
+        &self,
+        prompt: &Prompt,
+        on_partial: &mut dyn FnMut(&str),
+    ) -> Result<Value, AiError> {
+        let _ = on_partial;
+        self.complete(prompt)
+    }
 }
 
 impl<B: Backend + ?Sized> Backend for &B {
@@ -41,6 +54,13 @@ impl<B: Backend + ?Sized> Backend for &B {
     fn complete(&self, prompt: &Prompt) -> Result<Value, AiError> {
         (**self).complete(prompt)
     }
+    fn complete_streaming(
+        &self,
+        prompt: &Prompt,
+        on_partial: &mut dyn FnMut(&str),
+    ) -> Result<Value, AiError> {
+        (**self).complete_streaming(prompt, on_partial)
+    }
 }
 
 impl<B: Backend + ?Sized> Backend for Box<B> {
@@ -49,6 +69,13 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     }
     fn complete(&self, prompt: &Prompt) -> Result<Value, AiError> {
         (**self).complete(prompt)
+    }
+    fn complete_streaming(
+        &self,
+        prompt: &Prompt,
+        on_partial: &mut dyn FnMut(&str),
+    ) -> Result<Value, AiError> {
+        (**self).complete_streaming(prompt, on_partial)
     }
 }
 
@@ -80,9 +107,34 @@ impl<B: Backend> Assistant<B> {
 
     /// 按用户的决定生成回信草稿。
     pub fn draft(&self, req: &DraftRequest<'_>) -> Result<Draft, AiError> {
+        self.draft_streaming(req, &mut |_| {})
+    }
+
+    /// 生成回信草稿，并在生成过程中把已生成的正文（逐步变长）交给 `on_body`。
+    pub fn draft_streaming(
+        &self,
+        req: &DraftRequest<'_>,
+        on_body: &mut dyn FnMut(&str),
+    ) -> Result<Draft, AiError> {
         let prompt = prompt::draft(req, &self.ui_lang, None);
-        let value = self.backend.complete(&prompt)?;
+        let value = self.complete_with_body(&prompt, on_body)?;
         parse::draft(value)
+    }
+
+    fn complete_with_body(
+        &self,
+        prompt: &Prompt,
+        on_body: &mut dyn FnMut(&str),
+    ) -> Result<Value, AiError> {
+        let mut last_len = 0;
+        self.backend.complete_streaming(prompt, &mut |raw| {
+            if let Some(body) = partial_string_field(raw, "body") {
+                if body.len() != last_len {
+                    last_len = body.len();
+                    on_body(&body);
+                }
+            }
+        })
     }
 
     /// 以当前草稿为基础整篇改写，并给出修改对比。
@@ -96,8 +148,19 @@ impl<B: Backend> Assistant<B> {
         current: &str,
         basis: &DraftBasis,
     ) -> Result<Revision, AiError> {
+        self.revise_streaming(req, current, basis, &mut |_| {})
+    }
+
+    /// 整篇改写，并在生成过程中把已生成的正文交给 `on_body`。
+    pub fn revise_streaming(
+        &self,
+        req: &DraftRequest<'_>,
+        current: &str,
+        basis: &DraftBasis,
+        on_body: &mut dyn FnMut(&str),
+    ) -> Result<Revision, AiError> {
         let prompt = prompt::draft(req, &self.ui_lang, Some((current, basis)));
-        let value = self.backend.complete(&prompt)?;
+        let value = self.complete_with_body(&prompt, on_body)?;
         let draft = parse::draft(value)?;
         let changes = diff(current, &draft.body);
         Ok(Revision { draft, changes })

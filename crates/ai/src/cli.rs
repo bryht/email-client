@@ -18,8 +18,9 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
 /// 支持的命令行工具。
@@ -144,6 +145,16 @@ impl CliBackend {
 
     /// 生成要执行的命令。单独拆出，便于检查安全参数。
     pub fn invocation(&self, prompt: &Prompt) -> Invocation {
+        self.invocation_with(prompt, false)
+    }
+
+    /// 工具能否边生成边输出。
+    pub fn supports_streaming(&self) -> bool {
+        matches!(self.config.kind, CliKind::ClaudeCode | CliKind::Ollama)
+    }
+
+    /// 生成要执行的命令；`stream` 为真时请求流式输出。
+    pub fn invocation_with(&self, prompt: &Prompt, stream: bool) -> Invocation {
         let c = &self.config;
         let program: OsString = c
             .program
@@ -156,7 +167,14 @@ impl CliBackend {
             CliKind::ClaudeCode => {
                 push("--print");
                 push("--output-format");
-                push("json");
+                if stream {
+                    // 逐段输出事件；结构化结果以 input_json_delta 片段到达。
+                    push("stream-json");
+                    push("--verbose");
+                    push("--include-partial-messages");
+                } else {
+                    push("json");
+                }
                 // 关闭全部内置工具。
                 push("--tools");
                 push("");
@@ -215,30 +233,82 @@ impl CliBackend {
 
     fn parse_output(&self, stdout: &str) -> Result<Value, AiError> {
         match self.config.kind {
+            CliKind::ClaudeCode => self.claude_envelope(extract_json(stdout)?),
+            CliKind::Codex | CliKind::Ollama => extract_json(stdout),
+        }
+    }
+
+    /// 解析 `stream-json` 输出：取最后一个 `result` 事件。
+    fn parse_stream_output(&self, stdout: &str) -> Result<Value, AiError> {
+        match self.config.kind {
             CliKind::ClaudeCode => {
-                let envelope = extract_json(stdout)?;
-                if envelope.get("is_error").and_then(Value::as_bool) == Some(true) {
-                    let detail = envelope
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .unwrap_or("未知错误")
-                        .to_string();
-                    return Err(AiError::Failed {
-                        tool: self.name.clone(),
-                        code: None,
-                        detail,
-                    });
-                }
-                if let Some(v @ Value::Object(_)) = envelope.get("structured_output") {
-                    return Ok(v.clone());
-                }
-                match envelope.get("result").and_then(Value::as_str) {
-                    Some(text) => extract_json(text),
-                    None => Err(AiError::InvalidOutput("Claude Code 输出缺少结果".into())),
-                }
+                let result = stdout
+                    .lines()
+                    .rev()
+                    .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+                    .find(|v| v.get("type").and_then(Value::as_str) == Some("result"))
+                    .ok_or_else(|| AiError::InvalidOutput("Claude Code 输出缺少结果".into()))?;
+                self.claude_envelope(result)
             }
             CliKind::Codex | CliKind::Ollama => extract_json(stdout),
         }
+    }
+
+    fn claude_envelope(&self, envelope: Value) -> Result<Value, AiError> {
+        if envelope.get("is_error").and_then(Value::as_bool) == Some(true) {
+            let detail = envelope
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误")
+                .to_string();
+            return Err(AiError::Failed {
+                tool: self.name.clone(),
+                code: None,
+                detail,
+            });
+        }
+        if let Some(v @ Value::Object(_)) = envelope.get("structured_output") {
+            return Ok(v.clone());
+        }
+        match envelope.get("result").and_then(Value::as_str) {
+            Some(text) => extract_json(text),
+            None => Err(AiError::InvalidOutput("Claude Code 输出缺少结果".into())),
+        }
+    }
+}
+
+/// 把 Claude Code `stream-json` 输出的事件拼成已生成的 JSON 文本。
+#[derive(Default)]
+struct ClaudeStream {
+    line: String,
+    generated: String,
+}
+
+impl ClaudeStream {
+    /// 输入一段标准输出；有新内容时返回目前为止生成的文本。
+    fn feed(&mut self, chunk: &str) -> Option<&str> {
+        self.line.push_str(chunk);
+        let mut changed = false;
+        while let Some(pos) = self.line.find('\n') {
+            let line: String = self.line.drain(..=pos).collect();
+            let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            if event.get("type").and_then(Value::as_str) != Some("stream_event") {
+                continue;
+            }
+            let delta = &event["event"]["delta"];
+            let piece = match delta.get("type").and_then(Value::as_str) {
+                Some("input_json_delta") => delta.get("partial_json"),
+                Some("text_delta") => delta.get("text"),
+                _ => None,
+            };
+            if let Some(piece) = piece.and_then(Value::as_str) {
+                self.generated.push_str(piece);
+                changed = true;
+            }
+        }
+        changed.then_some(self.generated.as_str())
     }
 }
 
@@ -249,13 +319,48 @@ impl Backend for CliBackend {
 
     fn complete(&self, prompt: &Prompt) -> Result<Value, AiError> {
         let inv = self.invocation(prompt);
-        let stdout = run_isolated(&inv, self.config.timeout, &self.name)?;
+        let stdout = run_isolated(&inv, self.config.timeout, &self.name, &mut |_| {})?;
         self.parse_output(&stdout)
+    }
+
+    fn complete_streaming(
+        &self,
+        prompt: &Prompt,
+        on_partial: &mut dyn FnMut(&str),
+    ) -> Result<Value, AiError> {
+        if !self.supports_streaming() {
+            return self.complete(prompt);
+        }
+        let inv = self.invocation_with(prompt, true);
+        let stdout = match self.config.kind {
+            CliKind::ClaudeCode => {
+                let mut stream = ClaudeStream::default();
+                run_isolated(&inv, self.config.timeout, &self.name, &mut |chunk| {
+                    if let Some(text) = stream.feed(chunk) {
+                        on_partial(text);
+                    }
+                })?
+            }
+            _ => {
+                let mut generated = String::new();
+                run_isolated(&inv, self.config.timeout, &self.name, &mut |chunk| {
+                    generated.push_str(chunk);
+                    on_partial(&generated);
+                })?
+            }
+        };
+        self.parse_stream_output(&stdout)
     }
 }
 
 /// 在新建的空临时目录中运行命令，结束后删除目录。
-fn run_isolated(inv: &Invocation, timeout: Duration, tool: &str) -> Result<String, AiError> {
+/// 标准输出每到达一段就交给 `on_chunk`（按完整的 UTF-8 字符切分），最后返回全部输出。
+fn run_isolated(
+    inv: &Invocation,
+    timeout: Duration,
+    tool: &str,
+    on_chunk: &mut dyn FnMut(&str),
+) -> Result<String, AiError> {
     let workdir = tempfile::Builder::new()
         .prefix("letterdesk-ai-")
         .tempdir()?;
@@ -282,10 +387,32 @@ fn run_isolated(inv: &Invocation, timeout: Duration, tool: &str) -> Result<Strin
         let _ = stdin.write_all(input.as_bytes());
     });
     let mut out = child.stdout.take().expect("stdout is piped");
+    let (tx, rx) = mpsc::channel::<String>();
     let reader = thread::spawn(move || {
-        let mut s = String::new();
-        let _ = out.read_to_string(&mut s);
-        s
+        let mut buf = [0u8; 4096];
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            match out.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    pending.extend_from_slice(&buf[..n]);
+                    let valid = match std::str::from_utf8(&pending) {
+                        Ok(s) => s.len(),
+                        Err(e) => e.valid_up_to(),
+                    };
+                    if valid > 0 {
+                        let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
+                        pending.drain(..valid);
+                        if tx.send(text).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let _ = tx.send(String::from_utf8_lossy(&pending).into_owned());
+        }
     });
     let mut err = child.stderr.take().expect("stderr is piped");
     let err_reader = thread::spawn(move || {
@@ -294,19 +421,34 @@ fn run_isolated(inv: &Invocation, timeout: Duration, tool: &str) -> Result<Strin
         s
     });
 
-    let status = match child.wait_timeout(timeout)? {
-        Some(status) => status,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(AiError::Timeout {
-                tool: tool.into(),
-                timeout,
-            });
+    let deadline = Instant::now() + timeout;
+    let mut stdout = String::new();
+    let kill = |child: &mut std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+        AiError::Timeout {
+            tool: tool.into(),
+            timeout,
         }
     };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(chunk) => {
+                on_chunk(&chunk);
+                stdout.push_str(&chunk);
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(kill(&mut child)),
+        }
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let status = match child.wait_timeout(remaining)? {
+        Some(status) => status,
+        None => return Err(kill(&mut child)),
+    };
     let _ = writer.join();
-    let stdout = reader.join().unwrap_or_default();
+    let _ = reader.join();
     let stderr = err_reader.join().unwrap_or_default();
     drop(workdir);
 
@@ -464,6 +606,46 @@ mod tests {
             backend.parse_output(err),
             Err(AiError::Failed { .. })
         ));
+    }
+
+    #[test]
+    fn claude_streaming_invocation_requests_partial_events() {
+        let backend = CliBackend::new(CliConfig::new(CliKind::ClaudeCode)).unwrap();
+        let a = args(&backend.invocation_with(&prompt(), true));
+        assert!(has_pair(&a, "--output-format", "stream-json"));
+        assert!(a.contains(&"--verbose".to_string()));
+        assert!(a.contains(&"--include-partial-messages".to_string()));
+        assert!(has_pair(&a, "--tools", ""));
+    }
+
+    #[test]
+    fn claude_stream_events_are_assembled() {
+        let events = [
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"StructuredOutput"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"body\": \"Hi Ma"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"ya\"}"}}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"body":"Hi Maya"}}"#,
+        ];
+        let all = events.join("\n") + "\n";
+        let mut stream = ClaudeStream::default();
+        let mut seen = Vec::new();
+        // 故意按不对齐的位置切分，模拟管道里的任意分段。
+        for chunk in all.as_bytes().chunks(37) {
+            if let Some(text) = stream.feed(std::str::from_utf8(chunk).unwrap()) {
+                seen.push(text.to_string());
+            }
+        }
+        assert_eq!(seen.last().unwrap(), r#"{"body": "Hi Maya"}"#);
+        assert_eq!(
+            crate::partial_string_field(&seen[0], "body").as_deref(),
+            Some("Hi Ma")
+        );
+        let backend = CliBackend::new(CliConfig::new(CliKind::ClaudeCode)).unwrap();
+        assert_eq!(
+            backend.parse_stream_output(&all).unwrap(),
+            json!({"body": "Hi Maya"})
+        );
     }
 
     #[test]
