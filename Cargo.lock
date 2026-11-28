@@ -2424,6 +2424,7 @@ version = "0.1.0"
 dependencies = [
  "ai",
  "ammonia",
+ "conversation",
  "dioxus",
  "dirs 7.0.0",
  "futures-channel",

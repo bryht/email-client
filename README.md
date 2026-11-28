@@ -90,16 +90,18 @@ Letterdesk（暂名）：用 Rust 编写的开源桌面邮件客户端，按人�
 
 12 个单元测试覆盖以上规则，其中一个用 `samples/` 的真实样例。
 
+**按人浏览界面**（`crates/desktop/src/inbox.rs`）：`--mailbox 目录` 读取目录中所有 `.eml`，`--me` 指定自己的地址。左栏按最近往来列出对话：头像（按地址固定颜色）、参与人名字、第二行显示最近一封的 Cc（PLAN 的 `Cc 名字` 样式）或主题、日期。中间是所选对话的时间线：按话题分隔，每封显示 From / To / Cc 和日期；要回复的那封（最近一封别人发来的）默认显示 HTML 原文，其余显示纯文本摘要，可点“查看原文”展开。回复建议面板和写信框针对要回复的那封邮件，换对话时重置。
+
 **M2 待做**：
 
 1. **Microsoft Graph 收信**（需要你提供：在 Azure 门户注册一个“公共客户端/本机”应用，允许个人 Microsoft 账号和组织账号，开启 PKCE 回调 `http://localhost`，申请 `Mail.ReadWrite`、`Mail.Send`、`offline_access`、`User.Read` 委托权限，然后把**应用（客户端）ID** 给我；客户端 ID 不是机密，会写进源码）。拿到后实现：OAuth 登录（系统浏览器 + 本机回调 + PKCE）、令牌存 Windows 凭据管理器（`keyring`）、按文件夹增量同步（delta query）、本地 SQLite 缓存。
 2. **Gmail IMAP 收信**：用应用专用密码登录，`async-imap` 同步最近 90 天，按 `X-GM-MSGID` 去重、按 SPECIAL-USE 识别文件夹。需要一个开了两步验证的 Gmail 测试账号；本云端环境可能连不上 imap.gmail.com，需要在本地运行。
 3. **本地存储**（`mail-store`）：SQLite（sqlx）保存邮件和同步状态，tantivy 全文搜索。不依赖外部服务，可以先做。
-4. 桌面界面：左栏显示对话列表（`conversation::group` 的结果），右侧显示对话时间线。
+4. ~~桌面界面：对话列表与时间线~~ 已完成（见下）。
 
 ### 下一步
 
-M1 剩下的待做事项需要 Windows / macOS 真机。M2 中不依赖外部账号的部分可以先做：**M2 待做第 3 项（本地存储）和第 4 项（对话列表界面，先用 `samples/` 的邮件）**。第 1 项需要你提供 Azure 应用的客户端 ID，第 2 项需要 Gmail 测试账号和可访问 Gmail 的网络。M0 未完成的三项可在具备条件的环境中随时补做。
+M1 剩下的待做事项需要 Windows / macOS 真机。M2 中不依赖外部账号的部分可以先做：**M2 待做第 3 项（本地存储：SQLite 保存邮件与同步状态、tantivy 全文搜索，界面改为从本地库读取）**。第 1 项需要你提供 Azure 应用的客户端 ID，第 2 项需要 Gmail 测试账号和可访问 Gmail 的网络。M0 未完成的三项可在具备条件的环境中随时补做。
 
 ### 已知问题
 
@@ -176,7 +178,8 @@ Letterdesk 只调用你原样安装的官方 CLI，不读取、不保存任何�
 Linux 需要先安装 WebKitGTK：`sudo apt-get install libwebkit2gtk-4.1-dev libxdo-dev libgtk-3-dev`；Windows（WebView2）和 macOS 无需额外安装。
 
 ```sh
-cargo run -p letterdesk-desktop                                   # 默认打开 samples/html-newsletter.eml
+cargo run -p letterdesk-desktop -- --mailbox samples --me lin@example.com   # 按人浏览 samples/ 中的全部邮件
+cargo run -p letterdesk-desktop                                   # 只打开内置的一封样例
 cargo run -p letterdesk-desktop -- --email samples/maya-meeting.eml --backend claude --my-name Lin
 cargo run -p letterdesk-desktop -- --selftest                     # 隔离与清洗自检，全部通过时退出码为 0
 cargo run -p letterdesk-desktop -- --email samples/maya-meeting.eml --autopilot   # 自动演示 AI 流程

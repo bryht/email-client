@@ -14,7 +14,7 @@ To: Lin Chen <lin@example.com>
 Subject: Link test
 Content-Type: text/html; charset=utf-8
 
-<a href="https://example.com/landing?x=1" style="display:block;font-size:40px;padding:30px">OPEN THIS LINK</a>
+<a href="https://example.com/landing?x=1" style="display:block;height:600px;font-size:40px;padding:30px">OPEN THIS LINK</a>
 EML
 
 # webbrowser crate 在 Linux 上遵循 $BROWSER：用假浏览器记录被打开的地址。
@@ -36,9 +36,9 @@ if [ -z "$WID" ]; then
 fi
 sleep 5
 
-# 链接位于来信 iframe 顶部；相对窗口点击，最多重试 5 次。
+# 链接是一个很高的块，占满来信 iframe；在阅读区中部相对窗口点击，最多重试 5 次。
 for attempt in 1 2 3 4 5; do
-  xdotool mousemove --window "$WID" 300 200 click 1
+  xdotool mousemove --window "$WID" 600 330 click 1
   sleep 3
   if grep -qx "https://example.com/landing?x=1" "$WORK/opened.txt" 2>/dev/null; then
     echo "通过：链接已交给系统浏览器打开（第 $attempt 次点击）"

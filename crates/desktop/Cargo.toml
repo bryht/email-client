@@ -23,3 +23,4 @@ futures-util = "0.3"
 similar.workspace = true
 dirs = "7"
 serde.workspace = true
+conversation.workspace = true

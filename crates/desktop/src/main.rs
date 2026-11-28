@@ -1,47 +1,76 @@
-//! Letterdesk 桌面界面原型（M1）。
+//! Letterdesk 桌面界面原型。
 //!
-//! 验证两件高风险的事：
-//! 1. HTML 来信在清洗 + CSP + sandbox iframe 三层隔离下显示，碰不到应用接口；
-//! 2. 写信框由 Rust 负责格式命令、清洗和纯文本转换，不使用 JS 编辑器库。
+//! - 左栏：按人列出对话（`conversation::group` 的结果）；
+//! - 中间：所选对话的时间线（按话题分隔，来信 HTML 在清洗 + CSP + sandbox iframe 中隔离显示）
+//!   与“回复建议”面板；
+//! - 右侧：Rust 负责格式与清洗的写信框。
 //!
 //! 用法：
-//!   letterdesk-desktop [--email 来信.eml] [--draft 草稿.txt]
+//!   letterdesk-desktop [--mailbox 目录] [--email 来信.eml ...] [--me 我的地址 ...] [--draft 草稿.txt]
 //!                      [--backend claude|ollama|codex] [--model 模型] [--login api-key|subscription]
 //!   letterdesk-desktop --selftest     # 加载恶意样例并自动检查，输出 JSON 结果后退出
 
 mod ai_panel;
 mod composer;
 mod html;
+mod inbox;
 mod selftest;
 mod settings;
 
 use ai::cli::{CliKind, Login};
 use ai_panel::{AiPanel, AiSettings};
-use composer::Composer;
+use composer::{Composer, write_editor_html};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
+use inbox::{ConversationList, Timeline, active_message};
 use mail_core::Email;
+use std::path::Path;
 use std::sync::OnceLock;
 
 const STYLE: &str = include_str!("style.css");
 const DEFAULT_EMAIL: &[u8] = include_bytes!("../../../samples/html-newsletter.eml");
-const USAGE: &str = "用法：letterdesk-desktop [--email 来信.eml] [--draft 草稿.txt] \
-[--backend claude|ollama|codex] [--model 模型] [--login api-key|subscription] [--allow-unverified] \
-[--my-name 名字] [--autopilot] [--selftest]";
+const USAGE: &str = "用法：letterdesk-desktop [--mailbox 目录] [--email 来信.eml ...] [--me 我的地址 ...] \
+[--draft 草稿.txt] [--backend claude|ollama|codex] [--model 模型] [--login api-key|subscription] \
+[--allow-unverified] [--my-name 名字] [--autopilot] [--selftest]";
 
 #[derive(Debug, Clone)]
-struct Args {
-    email: Email,
+pub struct Args {
+    pub emails: Vec<Email>,
+    /// 自己的地址和别名，用于归组和计算回复对象。
+    pub me: Vec<String>,
     /// 启动时放进写信框的草稿（纯文本）。
-    draft: Option<String>,
-    ai: AiSettings,
-    selftest: bool,
+    pub draft: Option<String>,
+    pub ai: AiSettings,
+    pub selftest: bool,
 }
 
 static ARGS: OnceLock<Args> = OnceLock::new();
 
+fn load_eml(path: &Path) -> Result<Email, String> {
+    let raw = std::fs::read(path).map_err(|e| format!("无法读取 {}：{e}", path.display()))?;
+    Email::parse(&raw).map_err(|e| format!("无法解析 {}：{e}", path.display()))
+}
+
+fn load_mailbox(dir: &Path) -> Result<Vec<Email>, String> {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("无法读取目录 {}：{e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("eml")))
+        .collect();
+    paths.sort();
+    let mut emails = Vec::new();
+    for p in paths {
+        match load_eml(&p) {
+            Ok(e) => emails.push(e),
+            Err(err) => eprintln!("跳过：{err}"),
+        }
+    }
+    Ok(emails)
+}
+
 fn parse_args() -> Result<Args, String> {
-    let mut email_path = None;
+    let mut emails = Vec::new();
+    let mut me = Vec::new();
     let mut draft_path = None;
     let mut selftest = false;
     let mut ai = AiSettings {
@@ -59,7 +88,9 @@ fn parse_args() -> Result<Args, String> {
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--email" => email_path = Some(value(&mut it, "--email")?),
+            "--email" => emails.push(load_eml(Path::new(&value(&mut it, "--email")?))?),
+            "--mailbox" => emails.extend(load_mailbox(Path::new(&value(&mut it, "--mailbox")?))?),
+            "--me" => me.push(value(&mut it, "--me")?),
             "--draft" => draft_path = Some(value(&mut it, "--draft")?),
             "--backend" => {
                 ai.kind = match value(&mut it, "--backend")?.as_str() {
@@ -89,21 +120,19 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("未知参数：{other}\n{USAGE}")),
         }
     }
-    let raw = if selftest {
-        selftest::MALICIOUS_EMAIL.as_bytes().to_vec()
-    } else {
-        match email_path {
-            Some(p) => std::fs::read(&p).map_err(|e| format!("无法读取 {p}：{e}"))?,
-            None => DEFAULT_EMAIL.to_vec(),
-        }
-    };
-    let email = Email::parse(&raw).map_err(|e| format!("无法解析来信：{e}"))?;
+    if selftest {
+        emails =
+            vec![Email::parse(selftest::MALICIOUS_EMAIL.as_bytes()).map_err(|e| e.to_string())?];
+    } else if emails.is_empty() {
+        emails.push(Email::parse(DEFAULT_EMAIL).map_err(|e| e.to_string())?);
+    }
     let draft = match draft_path {
         Some(p) => Some(std::fs::read_to_string(&p).map_err(|e| format!("无法读取 {p}：{e}"))?),
         None => None,
     };
     Ok(Args {
-        email,
+        emails,
+        me,
         draft,
         ai,
         selftest,
@@ -139,28 +168,20 @@ fn main() {
 #[component]
 fn App() -> Element {
     let args = ARGS.get().expect("args");
-    let email = args.email.clone();
-    let mut remote_images = use_signal(|| true);
-    let srcdoc = html::email_srcdoc(&email.html, remote_images());
+    let conversations = use_hook(|| conversation::group(&args.emails, &args.me));
+    let mut selected = use_signal(|| 0usize);
+    let remote_images = use_signal(|| true);
     // 写信框内容（清洗后的 HTML），写信框与回复建议面板共用。
-    let content = use_signal(String::new);
+    let mut content = use_signal(String::new);
 
     if args.selftest {
         use_future(|| async { selftest::run().await });
     }
 
-    let to = email
-        .to
-        .iter()
-        .map(|m| m.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let cc = email
-        .cc
-        .iter()
-        .map(|m| m.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let conv = conversations[selected().min(conversations.len() - 1)].clone();
+    let active = active_message(&conv, &args.emails, &args.me);
+    let active_email = args.emails[active].clone();
+    let active_key = format!("{}-{active}", conv.id);
 
     rsx! {
         style { {STYLE} }
@@ -170,27 +191,26 @@ fn App() -> Element {
                 div { class: "rail-item", "People" }
                 div { class: "rail-item", "Calendar" }
             }
-            section { class: "reader",
-                header { class: "mail-header",
-                    h1 { "{email.subject}" }
-                    div { class: "meta", b { "From: " } "{email.from}" }
-                    if !to.is_empty() { div { class: "meta", b { "To: " } "{to}" } }
-                    if !cc.is_empty() { div { class: "meta", b { "Cc: " } "{cc}" } }
-                    label { class: "remote-toggle",
-                        input {
-                            r#type: "checkbox",
-                            checked: remote_images(),
-                            onchange: move |e| remote_images.set(e.checked()),
-                        }
-                        " 自动加载外部图片（加载可能向发件人透露阅读时间）"
+            ConversationList {
+                conversations: conversations.clone(),
+                emails: args.emails.clone(),
+                me: args.me.clone(),
+                selected: selected(),
+                on_select: move |i: usize| {
+                    if i != selected() {
+                        selected.set(i);
+                        // 换对话时清空写信框；回复建议面板随 key 重建。
+                        write_editor_html("");
+                        content.set(String::new());
                     }
-                }
-                iframe {
-                    id: "ld-email-frame",
-                    class: "email-frame",
-                    // 不给任何许可：不能运行脚本、不能访问父页面、不能弹窗或提交表单。
-                    "sandbox": "",
-                    srcdoc: "{srcdoc}",
+                },
+            }
+            section { class: "reader",
+                Timeline {
+                    conversation: conv.clone(),
+                    emails: args.emails.clone(),
+                    active,
+                    remote_images,
                 }
                 if args.selftest {
                     // 只在自检时出现：不经清洗、只靠 CSP + sandbox 的第二道防线。
@@ -198,7 +218,7 @@ fn App() -> Element {
                         id: "ld-raw-frame",
                         class: "email-frame raw",
                         "sandbox": "",
-                        srcdoc: html::wrap_email_document(&email.html, false),
+                        srcdoc: html::wrap_email_document(&active_email.html, false),
                     }
                     // 对照组：允许脚本的 iframe 必须能发出消息，证明检测本身有效。
                     iframe {
@@ -207,13 +227,17 @@ fn App() -> Element {
                         "sandbox": "allow-scripts",
                         srcdoc: "<script>parent.postMessage('control-ran','*')</script>",
                     }
-                }
-                if !args.selftest {
-                    AiPanel { email: email.clone(), settings: args.ai.clone(), content }
+                } else {
+                    AiPanel {
+                        key: "{active_key}",
+                        email: active_email.clone(),
+                        settings: args.ai.clone(),
+                        content,
+                    }
                 }
             }
             section { class: "compose",
-                h2 { "回复 {email.from.display_name()}" }
+                h2 { "回复 {active_email.from.display_name()}" }
                 Composer { content, initial: args.draft.clone() }
             }
         }
